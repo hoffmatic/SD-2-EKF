@@ -1,25 +1,33 @@
-# Rocket Airbrake EKF
+# SD-2-EKF
 
-Learning-oriented error-state EKF prototype for a rocket airbrake avionics project.
+Embedded-oriented estimator and airbrake-control scaffold for Project AMBAR.
 
-This repository currently contains a standalone C++ demo that estimates NED position,
-velocity, attitude, IMU biases, and barometer bias from simulated IMU, barometer, and
-GPS updates.
+The code now follows the AMBAR M3 concept report: a 3-inch test vehicle targeting
+3000 ft apogee with +/-100 ft tolerance, autonomous airbrake deployment after
+burnout, and live flight-state telemetry.
+
+## What Is Implemented
+
+- 4-state vertical EKF: altitude, vertical velocity, accelerometer bias, and
+  barometer bias
+- Timestamp validation for asynchronous IMU input
+- Barometer innovation gating and Joseph-form covariance update
+- Flight phase tracking: pad idle, boost, coast, airbrake active, recovery, fault
+- Apogee prediction and bounded airbrake deployment command
+- Embedded-friendly interfaces with fixed-size arrays and no heap allocation
 
 ## Current Status
 
-This is a starting point, not flight-ready software.
+This is an integration scaffold, not flight-ready software.
 
-Before use in flight hardware, the estimator should be refactored into a bounded
-embedded module with:
+Before use in flight hardware, add:
 
-- Real timestamped IMU, barometer, and GPS inputs
-- Explicit body-frame axis conventions
-- Sensor validation and innovation gating
-- Joseph-form covariance updates
-- Flight-phase-specific behavior
-- A separate apogee predictor and airbrake controller
-- Hardware-in-the-loop and flight-log replay tests
+- Board support for the actual IMU, barometer, radio, logger, and actuator
+- IMU body-axis alignment and gravity compensation
+- A drag-aware apogee predictor calibrated from OpenRocket and flight logs
+- Servo or motor driver limits, current monitoring, and fail-safe behavior
+- Unit tests, simulation replay tests, and hardware-in-the-loop tests
+- Telemetry packet definitions for estimate, phase, command, and health
 
 ## Build
 
@@ -30,6 +38,34 @@ cmake --build build
 ```
 
 For single-config generators, the executable may be under `build/rocket_airbrake_ekf`.
+
+Direct compiler check, useful on Windows when CMake is not installed:
+
+```powershell
+g++ -std=c++17 -Wall -Wextra -Wpedantic -I include src/ambar_airbrake.cpp src/main.cpp -o build\rocket_airbrake_ekf.exe
+.\build\rocket_airbrake_ekf.exe
+```
+
+## Sensor Interface
+
+The EKF expects vertical acceleration in the launch frame, positive upward, after
+IMU axis alignment and gravity compensation:
+
+```cpp
+flightComputer.updateImu(timestamp_s, verticalAcceleration_mps2);
+```
+
+The barometer update expects altitude above the launch pad:
+
+```cpp
+flightComputer.updateBarometer(barometerAltitudeAgl_m, barometerStdDev_m);
+```
+
+The actuator should consume only `AirbrakeCommand`. If `inhibit` is true, command
+the safe/retracted state.
+
+See [docs/ambar_project_mapping.md](docs/ambar_project_mapping.md) for the
+mapping from the AMBAR M3 report to this code.
 
 ## Safety Note
 
