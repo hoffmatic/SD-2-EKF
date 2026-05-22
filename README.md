@@ -67,6 +67,9 @@ the safe/retracted state.
 See [docs/ambar_project_mapping.md](docs/ambar_project_mapping.md) for the
 mapping from the AMBAR M3 report to this code.
 
+See [docs/ambar_bom_hardware_notes.md](docs/ambar_bom_hardware_notes.md) for the
+BOM-derived hardware interfaces and open integration questions.
+
 ## Safety Note
 
 Rocket airbrake software can affect flight stability and recovery outcomes. Treat this
