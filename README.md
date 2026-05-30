@@ -25,7 +25,7 @@ Before use in flight hardware, add:
 - Board support for the actual IMU, barometer, radio, logger, and actuator
 - IMU body-axis alignment and gravity compensation
 - A drag-aware apogee predictor calibrated from OpenRocket and flight logs
-- Servo or motor driver limits, current monitoring, and fail-safe behavior
+- TMC5240 motor driver limits, current monitoring, and fail-safe behavior
 - Unit tests, simulation replay tests, and hardware-in-the-loop tests
 - Telemetry packet definitions for estimate, phase, command, and health
 
@@ -69,6 +69,9 @@ mapping from the AMBAR M3 report to this code.
 
 See [docs/ambar_bom_hardware_notes.md](docs/ambar_bom_hardware_notes.md) for the
 BOM-derived hardware interfaces and open integration questions.
+
+See [docs/v3_kicad_hardware_map.md](docs/v3_kicad_hardware_map.md) for the
+current KiCad rev 3 component and pin map.
 
 See [docs/v2_schematic_reference.md](docs/v2_schematic_reference.md) for a
 provisional V2 schematic signal map to compare against the final V3 design.
