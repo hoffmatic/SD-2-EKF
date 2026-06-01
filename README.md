@@ -16,6 +16,8 @@ burnout, and live flight-state telemetry.
 - Apogee prediction and bounded airbrake deployment command
 - Embedded-friendly interfaces with fixed-size arrays and no heap allocation
 - June 1 KiCad pin-map constants in `include/ambar_board_pins.hpp`
+- Datasheet-derived device IDs, bus modes, addresses, and register constants in
+  `include/ambar_device_constants.hpp`
 
 ## Current Status
 
@@ -73,6 +75,9 @@ BOM-derived hardware interfaces and open integration questions.
 
 See [docs/v3_kicad_hardware_map.md](docs/v3_kicad_hardware_map.md) for the
 current KiCad rev 3 component and pin map.
+
+See [docs/datasheet_integration_notes.md](docs/datasheet_integration_notes.md)
+for the datasheet facts currently reflected in firmware constants.
 
 See [docs/v2_schematic_reference.md](docs/v2_schematic_reference.md) for a
 provisional V2 schematic signal map to compare against the final V3 design.

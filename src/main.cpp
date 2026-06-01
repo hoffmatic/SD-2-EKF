@@ -1,11 +1,19 @@
 #include "ambar_airbrake.hpp"
 #include "ambar_board_pins.hpp"
+#include "ambar_device_constants.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <iostream>
 
 namespace {
+
+static_assert(ambar::devices::bmp388::kI2cAddress == 0x76);
+static_assert(ambar::devices::lsm6dsv32x::kI2cAddress == 0x6A);
+static_assert(ambar::devices::lis2mdl::kI2cAddress == 0x1E);
+static_assert(ambar::devices::sx1280::kSpiMode == 0);
+static_assert(ambar::devices::tmc5240::kSpiMode == 3);
+static_assert(ambar::devices::w25q64jv::kTotalSizeBytes == 8UL * 1024UL * 1024UL);
 
 ambar::Scalar simulatedAccelerationAtTime(ambar::Scalar timestamp_s,
                                           ambar::Scalar deployFraction)

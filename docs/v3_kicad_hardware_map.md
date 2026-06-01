@@ -48,7 +48,8 @@ and is reflected below.
 
 The IMU is configured as an I2C device. Firmware still needs the physical board
 orientation so raw accelerometer data can be mapped into rocket vertical
-acceleration.
+acceleration. The `SDO/SA0` address-select pad is tied to `GND`, so the
+LSM6DSV32X I2C address is `0x6A`.
 
 ### Barometer
 
@@ -59,7 +60,9 @@ acceleration.
 | `PB14` | `/BARO_INT` | BMP388 `INT` |
 
 The current V3 design uses BMP388, not the BOM-listed LPS22HH. The firmware
-barometer driver should target BMP388 unless the schematic changes again.
+barometer driver should target BMP388 unless the schematic changes again. The
+`SDO` address-select pad is tied to `GND`, and `CSB` is tied to `+3V3`, so the
+BMP388 is in I2C mode at address `0x76`.
 
 ### Magnetometer
 
@@ -70,7 +73,8 @@ barometer driver should target BMP388 unless the schematic changes again.
 | `PC8` | `/MAGNET_INT` | LIS2MDLTR `INT/DRDY/SDO` |
 
 The current EKF does not require magnetometer input, but this interface can feed
-a later attitude/alignment layer or telemetry health checks.
+a later attitude/alignment layer or telemetry health checks. The LIS2MDL fixed
+I2C address is `0x1E`.
 
 ### Radio
 
@@ -85,7 +89,9 @@ a later attitude/alignment layer or telemetry health checks.
 | `PC5` | `/LORA_BUSY` | SX1280 `BUSY` |
 
 V3 still uses SX1280. Confirm the ground station is also SX1280-compatible; an
-SX1262 ground station will not talk to this 2.4 GHz radio.
+SX1262 ground station will not talk to this 2.4 GHz radio. The SX1280 datasheet
+requires SPI mode 0 and firmware should wait for `/LORA_BUSY` low before
+issuing commands.
 
 ### NOR Flash
 
@@ -97,6 +103,8 @@ SX1262 ground station will not talk to this 2.4 GHz radio.
 | `PD2` | `/FLASH_CS` | W25Q64 `/CS` |
 
 The current V3 design uses W25Q64, not the BOM-listed AT25DF321A.
+For the `W25Q64JVSSIQ`, the expected JEDEC response is manufacturer `0xEF` and
+device ID `0x4017`; capacity is 8 MB with 256-byte pages and 4 KB sectors.
 
 ### Stepper Motor Driver
 
@@ -112,7 +120,8 @@ The current V3 design uses W25Q64, not the BOM-listed AT25DF321A.
 | `PC7` | `/MOTOR_DIAG0` | TMC5240 `DIAG0` |
 
 V3 uses a TMC5240 stepper driver/controller over SPI. That means the actuator
-firmware should be register-driven, not a simple GPIO step/dir driver.
+firmware should be register-driven, not a simple GPIO step/dir driver. The
+TMC5240 uses SPI mode 3, 40-bit datagrams, and a 10 MHz maximum SPI clock.
 
 Relevant TMC5240 nets:
 
