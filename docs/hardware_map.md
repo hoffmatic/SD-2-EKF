@@ -1,4 +1,4 @@
-# V3 KiCad Hardware Map
+# Current Hardware Map
 
 Source files:
 
@@ -16,8 +16,8 @@ KiCad schematic title block:
 - Date: 2026-05-17
 - Company: Project AMBAR
 
-This document is generated from the current V3 KiCad project and supersedes the
-older V2 screenshot notes for firmware planning.
+This document is generated from the current V3 KiCad project and is the
+authoritative hardware reference for firmware planning in this repo.
 
 June 1 PCB update: the main sensor, radio, flash, and motor-driver pin groups
 remain consistent with the earlier V3 extract. The LED GPIO assignment changed
@@ -159,7 +159,7 @@ Relevant TMC5240 nets:
 | `PB4` | `/LED_6` |
 | `PH0` | `/MCU_TCXO` |
 
-## V3 Changes From Earlier BOM / V2 Assumptions
+## Changes From Earlier Assumptions
 
 - Barometer is BMP388 in V3, not LPS22HH.
 - Flash is W25Q64 in V3, not AT25DF321A.

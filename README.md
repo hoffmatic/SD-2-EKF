@@ -67,20 +67,17 @@ flightComputer.updateBarometer(barometerAltitudeAgl_m, barometerStdDev_m);
 The actuator should consume only `AirbrakeCommand`. If `inhibit` is true, command
 the safe/retracted state.
 
-See [docs/ambar_project_mapping.md](docs/ambar_project_mapping.md) for the
-mapping from the AMBAR M3 report to this code.
+## Current Project Files
 
-See [docs/ambar_bom_hardware_notes.md](docs/ambar_bom_hardware_notes.md) for the
-BOM-derived hardware interfaces and open integration questions.
+- [docs/project_requirements.md](docs/project_requirements.md): AMBAR M3
+  requirements mapped to the estimator and controller.
+- [docs/hardware_map.md](docs/hardware_map.md): current June 1 V3 KiCad
+  component and STM32 pin map.
+- [docs/datasheet_integration_notes.md](docs/datasheet_integration_notes.md):
+  datasheet facts reflected in firmware constants.
 
-See [docs/v3_kicad_hardware_map.md](docs/v3_kicad_hardware_map.md) for the
-current KiCad rev 3 component and pin map.
-
-See [docs/datasheet_integration_notes.md](docs/datasheet_integration_notes.md)
-for the datasheet facts currently reflected in firmware constants.
-
-See [docs/v2_schematic_reference.md](docs/v2_schematic_reference.md) for a
-provisional V2 schematic signal map to compare against the final V3 design.
+Older V2 screenshot notes and outdated BOM mismatch notes were removed from the
+live repo so GitHub only presents the current working baseline.
 
 ## Safety Note
 
