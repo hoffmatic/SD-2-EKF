@@ -5,14 +5,20 @@
 
 namespace ambar {
 
+// Use one scalar alias so the estimator can move between desktop simulation and
+// embedded targets without changing every numeric type in the codebase.
 using Scalar = float;
 
+// Common unit conversions and mission-level targets. The controller works in SI
+// units internally, even though the AMBAR requirement is written in feet.
 constexpr Scalar kFeetToMeters = 0.3048F;
 constexpr Scalar kMetersToFeet = 1.0F / kFeetToMeters;
 constexpr Scalar kStandardGravityMps2 = 9.80665F;
 constexpr Scalar kTargetApogeeM = 3000.0F * kFeetToMeters;
 constexpr Scalar kTargetToleranceM = 100.0F * kFeetToMeters;
 
+// The phase tracker is deliberately simple: it gates airbrake deployment based
+// on broad flight states instead of letting the controller act at any time.
 enum class FlightPhase : std::uint8_t {
     PadIdle,
     Boost,
@@ -22,6 +28,8 @@ enum class FlightPhase : std::uint8_t {
     Fault
 };
 
+// Bit flags make it possible to explain why deployment is blocked. That is
+// useful for telemetry, debugging, and preflight checks.
 enum InhibitFlags : std::uint32_t {
     kInhibitNone = 0U,
     kInhibitEstimatorUnhealthy = 1U << 0U,
@@ -32,22 +40,34 @@ enum InhibitFlags : std::uint32_t {
     kInhibitApogeeOnTarget = 1U << 5U
 };
 
+// Tuning for the 4-state vertical EKF. These defaults are conservative starting
+// values; real values should be tuned from bench data and flight logs.
 struct VerticalEkfConfig {
+    // Reject IMU samples with impossible timing so one bad timestamp cannot
+    // explode the state prediction.
     Scalar minDt_s = 0.0005F;
     Scalar maxDt_s = 0.0500F;
 
+    // Process noise describes how much unmodeled acceleration and bias drift we
+    // allow the filter to absorb between measurements.
     Scalar accelNoiseStdDev_mps2 = 3.0F;
     Scalar accelBiasRandomWalkStdDev_mps2_perRootS = 0.08F;
     Scalar barometerBiasRandomWalkStdDev_m_perRootS = 0.03F;
 
+    // Initial uncertainty is intentionally nonzero so early barometer updates
+    // can pull the state into agreement with the real pad-zero altitude.
     Scalar initialAltitudeVariance_m2 = 4.0F;
     Scalar initialVelocityVariance_m2ps2 = 25.0F;
     Scalar initialAccelBiasVariance_m2ps4 = 4.0F;
     Scalar initialBarometerBiasVariance_m2 = 4.0F;
 
+    // Innovation gating rejects barometer samples that are wildly inconsistent
+    // with the current estimate, which helps with pressure spikes and bad reads.
     Scalar barometerInnovationGateSigma = 5.0F;
 };
 
+// The estimator exposes navigation values and uncertainty, but keeps the raw
+// covariance private so the rest of the program cannot accidentally corrupt it.
 struct NavigationEstimate {
     Scalar altitudeAgl_m = 0.0F;
     Scalar verticalVelocity_mps = 0.0F;
@@ -60,6 +80,8 @@ struct NavigationEstimate {
     bool healthy = false;
 };
 
+// Health is separated from NavigationEstimate so telemetry can report both the
+// current state and how trustworthy the estimator has been recently.
 struct EstimatorHealth {
     bool initialized = false;
     bool healthy = false;
@@ -69,15 +91,23 @@ struct EstimatorHealth {
     Scalar lastBarometerInnovationSigma = 0.0F;
 };
 
+// A small vertical EKF for airbrake control. It estimates altitude, velocity,
+// accelerometer bias, and barometer bias, which are the minimum states needed
+// for a vertical apogee controller before full 6-DOF attitude work is added.
 class VerticalEkf4State {
 public:
     explicit VerticalEkf4State(const VerticalEkfConfig& config = {});
 
+    // Pad reset establishes altitude zero and clears accumulated health flags.
     void resetOnPad(Scalar timestamp_s);
 
+    // IMU propagation runs at the fastest sensor rate. The input is already
+    // expected to be launch-frame vertical acceleration with gravity removed.
     bool propagateWithImuVerticalAcceleration(Scalar timestamp_s,
                                               Scalar verticalAcceleration_mps2);
 
+    // Barometer updates run slower than the IMU and correct both altitude and
+    // barometer-bias drift.
     bool updateWithBarometerAltitude(Scalar barometerAltitudeAgl_m,
                                      Scalar barometerStdDev_m);
 
@@ -88,6 +118,8 @@ private:
     using StateVector = std::array<Scalar, 4>;
     using Matrix4 = std::array<std::array<Scalar, 4>, 4>;
 
+    // State ordering is fixed here so matrix math and measurement updates use
+    // names instead of magic indexes.
     enum StateIndex : int {
         kAltitude = 0,
         kVelocity = 1,
@@ -118,6 +150,7 @@ private:
     Scalar lastBarometerInnovationSigma_ = 0.0F;
 };
 
+// Thresholds for converting continuous estimates into coarse flight phases.
 struct FlightPhaseConfig {
     Scalar liftoffAltitude_m = 3.0F;
     Scalar liftoffAcceleration_mps2 = 15.0F;
@@ -127,6 +160,8 @@ struct FlightPhaseConfig {
     Scalar recoveryDescentVelocity_mps = -5.0F;
 };
 
+// Tracks the part of flight the vehicle appears to be in. The controller uses
+// this as a safety interlock so airbrakes only deploy during coast.
 class FlightPhaseTracker {
 public:
     explicit FlightPhaseTracker(const FlightPhaseConfig& config = {});
@@ -146,6 +181,8 @@ private:
     bool hasLaunchTimestamp_ = false;
 };
 
+// Parameters that turn predicted apogee error into a normalized deployment
+// request. Mechanical limits stay in the actuator driver; this remains unitless.
 struct AirbrakeControllerConfig {
     Scalar targetApogee_m = kTargetApogeeM;
     Scalar apogeeTolerance_m = kTargetToleranceM;
@@ -155,6 +192,8 @@ struct AirbrakeControllerConfig {
     Scalar minimumFlightTime_s = 1.0F;
 };
 
+// Command consumed by the future actuator layer. `deployFraction` is ignored
+// when `inhibit` is true.
 struct AirbrakeCommand {
     Scalar deployFraction = 0.0F;
     Scalar predictedApogee_m = 0.0F;
@@ -163,6 +202,8 @@ struct AirbrakeCommand {
     std::uint32_t inhibitFlags = kInhibitEstimatorUnhealthy;
 };
 
+// Computes the desired airbrake deployment. It does not know about motor steps,
+// current limits, or homing; those details belong to the TMC5240 actuator layer.
 class AirbrakeController {
 public:
     explicit AirbrakeController(const AirbrakeControllerConfig& config = {});
@@ -178,12 +219,16 @@ private:
     AirbrakeControllerConfig config_{};
 };
 
+// One top-level config object keeps test code and embedded bring-up code from
+// having to configure each subsystem separately.
 struct AmbarFlightComputerConfig {
     VerticalEkfConfig estimator{};
     FlightPhaseConfig phase{};
     AirbrakeControllerConfig controller{};
 };
 
+// A snapshot of everything the scheduler or telemetry layer needs after an
+// update: estimate, health, command, and phase.
 struct AmbarFlightComputerOutput {
     NavigationEstimate estimate{};
     EstimatorHealth health{};
@@ -191,15 +236,24 @@ struct AmbarFlightComputerOutput {
     FlightPhase phase = FlightPhase::PadIdle;
 };
 
+// Facade that wires the estimator, phase tracker, and controller together. This
+// is the class the eventual STM32 scheduler should call from sensor tasks.
 class AmbarFlightComputer {
 public:
     explicit AmbarFlightComputer(const AmbarFlightComputerConfig& config = {});
 
+    // Called during preflight after the rocket is powered and sitting still.
     void resetOnPad(Scalar timestamp_s);
+
+    // High-rate path: propagate state, update flight phase, and compute the
+    // latest airbrake command.
     AmbarFlightComputerOutput updateImu(Scalar timestamp_s,
                                         Scalar verticalAcceleration_mps2);
+
+    // Lower-rate path: correct altitude/bias from pressure altitude.
     AmbarFlightComputerOutput updateBarometer(Scalar barometerAltitudeAgl_m,
                                               Scalar barometerStdDev_m);
+
     AmbarFlightComputerOutput output() const;
 
 private:

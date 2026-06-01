@@ -7,6 +7,9 @@ namespace ambar {
 
 namespace {
 
+// With no drag model available yet, use a ballistic upper-bound apogee estimate.
+// This is intentionally simple: if velocity is upward, estimate how much higher
+// the rocket would coast under gravity alone; if descending, apogee is behind us.
 Scalar ballisticApogee(Scalar altitude_m, Scalar verticalVelocity_mps) {
     if (verticalVelocity_mps <= 0.0F) {
         return altitude_m;
@@ -22,10 +25,14 @@ Scalar ballisticApogee(Scalar altitude_m, Scalar verticalVelocity_mps) {
 VerticalEkf4State::VerticalEkf4State(const VerticalEkfConfig& config)
     : config_(config)
 {
+    // Start with a known-zero matrix. resetOnPad() fills in the operational
+    // uncertainty when the vehicle is actually initialized.
     covariance_ = {};
 }
 
 void VerticalEkf4State::resetOnPad(Scalar timestamp_s) {
+    // At pad reset, altitude, velocity, and biases are defined as zero. The
+    // covariance says "zero is our best guess, but not perfect knowledge."
     state_ = {};
     covariance_ = {};
     covariance_[kAltitude][kAltitude] = config_.initialAltitudeVariance_m2;
@@ -47,18 +54,23 @@ void VerticalEkf4State::resetOnPad(Scalar timestamp_s) {
 bool VerticalEkf4State::propagateWithImuVerticalAcceleration(Scalar timestamp_s,
                                                              Scalar verticalAcceleration_mps2)
 {
+    // Non-finite numbers usually mean a sensor conversion or timestamp failed.
+    // Reject them immediately so NaN/Inf never enters the covariance math.
     if (!valueIsFinite(timestamp_s) || !valueIsFinite(verticalAcceleration_mps2)) {
         healthy_ = false;
         ++rejectedImuSamples_;
         return false;
     }
 
+    // The first valid IMU sample can initialize the filter if resetOnPad() was
+    // not called explicitly. This keeps desktop simulations forgiving.
     if (!initialized_) {
         resetOnPad(timestamp_s);
         lastVerticalAcceleration_mps2_ = verticalAcceleration_mps2;
         return true;
     }
 
+    // Need two timestamps before a propagation interval can be computed.
     if (!hasLastImuTimestamp_) {
         hasLastImuTimestamp_ = true;
         lastImuTimestamp_s_ = timestamp_s;
@@ -68,20 +80,27 @@ bool VerticalEkf4State::propagateWithImuVerticalAcceleration(Scalar timestamp_s,
     const Scalar dt_s = timestamp_s - lastImuTimestamp_s_;
     lastImuTimestamp_s_ = timestamp_s;
 
+    // A bad dt creates a bad integration step. Mark unhealthy and wait for the
+    // next sample instead of trying to hide the fault.
     if (dt_s < config_.minDt_s || dt_s > config_.maxDt_s) {
         healthy_ = false;
         ++rejectedImuSamples_;
         return false;
     }
 
+    // The state estimates accelerometer bias, so remove it before integrating
+    // acceleration into velocity and altitude.
     const Scalar correctedAcceleration_mps2 =
         verticalAcceleration_mps2 - state_[kAccelBias];
     lastVerticalAcceleration_mps2_ = correctedAcceleration_mps2;
 
+    // Constant-acceleration kinematics over one IMU interval.
     state_[kAltitude] += state_[kVelocity] * dt_s
                        + 0.5F * correctedAcceleration_mps2 * dt_s * dt_s;
     state_[kVelocity] += correctedAcceleration_mps2 * dt_s;
 
+    // Linearized state transition for the covariance. Bias uncertainty feeds
+    // into velocity and altitude because a wrong bias looks like acceleration.
     Matrix4 transition = makeIdentityMatrix();
     transition[kAltitude][kVelocity] = dt_s;
     transition[kAltitude][kAccelBias] = -0.5F * dt_s * dt_s;
@@ -90,6 +109,8 @@ bool VerticalEkf4State::propagateWithImuVerticalAcceleration(Scalar timestamp_s,
     const Scalar accelVariance =
         config_.accelNoiseStdDev_mps2 * config_.accelNoiseStdDev_mps2;
 
+    // Q injects uncertainty from accelerometer noise and slowly wandering bias
+    // terms. This prevents the filter from becoming overconfident.
     Matrix4 processNoise{};
     processNoise[kAltitude][kAltitude] = 0.25F * dt_s * dt_s * dt_s * dt_s * accelVariance;
     processNoise[kAltitude][kVelocity] = 0.5F * dt_s * dt_s * dt_s * accelVariance;
@@ -104,10 +125,13 @@ bool VerticalEkf4State::propagateWithImuVerticalAcceleration(Scalar timestamp_s,
       * config_.barometerBiasRandomWalkStdDev_m_perRootS
       * dt_s;
 
+    // EKF prediction covariance: P = F P F^T + Q.
     covariance_ = add(
         multiply(multiply(transition, covariance_), transpose(transition)),
         processNoise
     );
+    // Floating-point roundoff can make P slightly asymmetric; the EKF expects a
+    // symmetric covariance matrix, so force symmetry after each update.
     symmetrizeCovariance();
     healthy_ = true;
     return true;
@@ -117,9 +141,12 @@ bool VerticalEkf4State::updateWithBarometerAltitude(Scalar barometerAltitudeAgl_
                                                     Scalar barometerStdDev_m)
 {
     if (!initialized_) {
+        // A barometer measurement alone does not establish IMU timing.
         return false;
     }
 
+    // Measurement standard deviation must be positive because it becomes the
+    // denominator of the Kalman update.
     if (!valueIsFinite(barometerAltitudeAgl_m)
         || !valueIsFinite(barometerStdDev_m)
         || barometerStdDev_m <= 0.0F) {
@@ -128,10 +155,12 @@ bool VerticalEkf4State::updateWithBarometerAltitude(Scalar barometerAltitudeAgl_
         return false;
     }
 
+    // Measurement model: z = altitude + barometer_bias + noise.
     const Scalar predictedMeasurement_m = state_[kAltitude] + state_[kBarometerBias];
     const Scalar innovation_m = barometerAltitudeAgl_m - predictedMeasurement_m;
     const Scalar measurementVariance_m2 = barometerStdDev_m * barometerStdDev_m;
 
+    // Scalar innovation variance S = H P H^T + R. H is [1, 0, 0, 1].
     const Scalar innovationVariance =
         covariance_[kAltitude][kAltitude]
       + covariance_[kBarometerBias][kBarometerBias]
@@ -148,12 +177,16 @@ bool VerticalEkf4State::updateWithBarometerAltitude(Scalar barometerAltitudeAgl_
     lastBarometerInnovation_m_ = innovation_m;
     lastBarometerInnovationSigma_ = innovationSigma;
 
+    // Reject pressure spikes or impossible altitude jumps. The estimator keeps
+    // propagating on IMU until a sane barometer sample arrives.
     if (std::fabs(innovation_m)
         > config_.barometerInnovationGateSigma * innovationSigma) {
         ++rejectedBarometerSamples_;
         return false;
     }
 
+    // Kalman gain maps one scalar barometer residual into all four state
+    // corrections. Altitude and baro bias get the strongest direct correction.
     std::array<Scalar, 4> gain{};
     for (int row = 0; row < 4; ++row) {
         gain[row] = (covariance_[row][kAltitude]
@@ -162,10 +195,8 @@ bool VerticalEkf4State::updateWithBarometerAltitude(Scalar barometerAltitudeAgl_
         state_[row] += gain[row] * innovation_m;
     }
 
-    Matrix4 measurement{};
-    measurement[0][kAltitude] = 1.0F;
-    measurement[0][kBarometerBias] = 1.0F;
-
+    // Since H = [1, 0, 0, 1], K*H can be written directly without a generic
+    // matrix type for 4x1 and 1x4 matrices.
     Matrix4 gainMeasurement{};
     for (int row = 0; row < 4; ++row) {
         gainMeasurement[row][kAltitude] = gain[row];
@@ -175,6 +206,8 @@ bool VerticalEkf4State::updateWithBarometerAltitude(Scalar barometerAltitudeAgl_
     const Matrix4 identity = makeIdentityMatrix();
     const Matrix4 correction = subtract(identity, gainMeasurement);
 
+    // Joseph form keeps covariance positive and numerically well behaved:
+    // P = (I-KH)P(I-KH)^T + K R K^T.
     Matrix4 josephNoise{};
     for (int row = 0; row < 4; ++row) {
         for (int column = 0; column < 4; ++column) {
@@ -191,6 +224,8 @@ bool VerticalEkf4State::updateWithBarometerAltitude(Scalar barometerAltitudeAgl_
 }
 
 NavigationEstimate VerticalEkf4State::estimate() const {
+    // Return a plain value object so callers can inspect the state without
+    // mutating the estimator internals.
     NavigationEstimate result{};
     result.altitudeAgl_m = state_[kAltitude];
     result.verticalVelocity_mps = state_[kVelocity];
@@ -205,6 +240,8 @@ NavigationEstimate VerticalEkf4State::estimate() const {
 }
 
 EstimatorHealth VerticalEkf4State::health() const {
+    // Health counters are intentionally monotonic after reset; telemetry can use
+    // them to spot intermittent sensor or timing problems.
     EstimatorHealth result{};
     result.initialized = initialized_;
     result.healthy = healthy_;
@@ -216,6 +253,8 @@ EstimatorHealth VerticalEkf4State::health() const {
 }
 
 VerticalEkf4State::Matrix4 VerticalEkf4State::makeIdentityMatrix() const {
+    // Hand-written 4x4 math avoids heap allocation and keeps this portable to
+    // embedded builds before a final matrix backend is chosen.
     Matrix4 identity{};
     for (int index = 0; index < 4; ++index) {
         identity[index][index] = 1.0F;
@@ -274,6 +313,8 @@ VerticalEkf4State::Matrix4 VerticalEkf4State::subtract(const Matrix4& left,
 }
 
 void VerticalEkf4State::symmetrizeCovariance() {
+    // Average mirrored entries instead of choosing one side. This preserves the
+    // information from both roundoff paths.
     for (int row = 0; row < 4; ++row) {
         for (int column = row + 1; column < 4; ++column) {
             const Scalar average = 0.5F * (covariance_[row][column]
@@ -294,6 +335,7 @@ FlightPhaseTracker::FlightPhaseTracker(const FlightPhaseConfig& config)
 }
 
 void FlightPhaseTracker::reset() {
+    // Reset to the safest phase: no launch detected and no deployment allowed.
     phase_ = FlightPhase::PadIdle;
     launchTimestamp_s_ = 0.0F;
     hasLaunchTimestamp_ = false;
@@ -304,12 +346,16 @@ FlightPhase FlightPhaseTracker::update(Scalar timestamp_s,
                                        Scalar verticalAcceleration_mps2)
 {
     if (!estimate.healthy) {
+        // Bad navigation state is a flight-control fault, so force the system
+        // into a phase where the controller will inhibit deployment.
         phase_ = FlightPhase::Fault;
         return phase_;
     }
 
     switch (phase_) {
     case FlightPhase::PadIdle:
+        // Liftoff can be detected by altitude or acceleration so a single noisy
+        // channel is less likely to prevent launch detection.
         if (estimate.altitudeAgl_m > config_.liftoffAltitude_m
             || verticalAcceleration_mps2 > config_.liftoffAcceleration_mps2) {
             phase_ = FlightPhase::Boost;
@@ -319,6 +365,8 @@ FlightPhase FlightPhaseTracker::update(Scalar timestamp_s,
         break;
 
     case FlightPhase::Boost:
+        // Burnout/coast requires enough time, low acceleration, and upward
+        // velocity. This avoids declaring coast during early motor transients.
         if (hasLaunchTimestamp_
             && timestamp_s - launchTimestamp_s_ >= config_.minimumBoostTime_s
             && verticalAcceleration_mps2 < config_.burnoutAcceleration_mps2
@@ -329,6 +377,8 @@ FlightPhase FlightPhaseTracker::update(Scalar timestamp_s,
 
     case FlightPhase::Coast:
     case FlightPhase::AirbrakeActive:
+        // Once descending quickly, apogee has passed and recovery behavior
+        // should dominate over airbrake commands.
         if (estimate.verticalVelocity_mps <= config_.recoveryDescentVelocity_mps) {
             phase_ = FlightPhase::Recovery;
         }
@@ -343,6 +393,8 @@ FlightPhase FlightPhaseTracker::update(Scalar timestamp_s,
 }
 
 void FlightPhaseTracker::markAirbrakeActive() {
+    // Keep phase changes explicit: the controller computes a command, then this
+    // tracker records that the command has actually requested deployment.
     if (phase_ == FlightPhase::Coast) {
         phase_ = FlightPhase::AirbrakeActive;
     }
@@ -371,6 +423,8 @@ AirbrakeCommand AirbrakeController::computeCommand(const NavigationEstimate& est
     command.predictedApogee_m = estimate.predictedApogee_m;
     command.inhibitFlags = kInhibitNone;
 
+    // Each safety check contributes a bit. The actuator can stay retracted, and
+    // telemetry can show exactly which check blocked deployment.
     if (!estimate.healthy) {
         command.inhibitFlags |= kInhibitEstimatorUnhealthy;
     }
@@ -391,6 +445,8 @@ AirbrakeCommand AirbrakeController::computeCommand(const NavigationEstimate& est
         command.inhibitFlags |= kInhibitDescending;
     }
 
+    // Deploy only when the predicted apogee is above the desired target by more
+    // than the tolerance band. If it is already on target, extra drag is harmful.
     const Scalar apogeeError_m = estimate.predictedApogee_m - config_.targetApogee_m;
     if (apogeeError_m <= config_.apogeeTolerance_m) {
         command.inhibitFlags |= kInhibitApogeeOnTarget;
@@ -402,6 +458,8 @@ AirbrakeCommand AirbrakeController::computeCommand(const NavigationEstimate& est
         return command;
     }
 
+    // Convert "how far above target" into a normalized deployment command. Full
+    // deployment is reached once error exceeds fullDeploymentError_m.
     command.deployFraction = clamp(
         apogeeError_m / config_.fullDeploymentError_m,
         0.0F,
@@ -422,6 +480,8 @@ AmbarFlightComputer::AmbarFlightComputer(const AmbarFlightComputerConfig& config
 }
 
 void AmbarFlightComputer::resetOnPad(Scalar timestamp_s) {
+    // Reset every subsystem that carries flight state so a new launch starts
+    // from a clean pad-zero condition.
     estimator_.resetOnPad(timestamp_s);
     phase_.reset();
     latestTimestamp_s_ = timestamp_s;
@@ -431,10 +491,15 @@ AmbarFlightComputerOutput AmbarFlightComputer::updateImu(Scalar timestamp_s,
                                                          Scalar verticalAcceleration_mps2)
 {
     latestTimestamp_s_ = timestamp_s;
+
+    // IMU is the fast path: predict navigation first, then update phase and
+    // controller using the freshest estimate.
     estimator_.propagateWithImuVerticalAcceleration(timestamp_s, verticalAcceleration_mps2);
     phase_.update(timestamp_s, estimator_.estimate(), verticalAcceleration_mps2);
 
     AmbarFlightComputerOutput result = buildOutput();
+    // If this update produces a real deployment request, record that the vehicle
+    // has moved from "coast" into active airbrake control.
     if (!result.airbrakeCommand.inhibit && result.airbrakeCommand.deployFraction > 0.0F) {
         phase_.markAirbrakeActive();
         result = buildOutput();
@@ -445,6 +510,8 @@ AmbarFlightComputerOutput AmbarFlightComputer::updateImu(Scalar timestamp_s,
 AmbarFlightComputerOutput AmbarFlightComputer::updateBarometer(Scalar barometerAltitudeAgl_m,
                                                                Scalar barometerStdDev_m)
 {
+    // Barometer only corrects the estimator. Phase transitions are intentionally
+    // driven from the IMU update cadence for consistent timing.
     estimator_.updateWithBarometerAltitude(barometerAltitudeAgl_m, barometerStdDev_m);
     return buildOutput();
 }
@@ -454,6 +521,8 @@ AmbarFlightComputerOutput AmbarFlightComputer::output() const {
 }
 
 AmbarFlightComputerOutput AmbarFlightComputer::buildOutput() const {
+    // Build one coherent snapshot so callers do not mix estimate/phase/command
+    // values from different update moments.
     AmbarFlightComputerOutput result{};
     result.estimate = estimator_.estimate();
     result.health = estimator_.health();
