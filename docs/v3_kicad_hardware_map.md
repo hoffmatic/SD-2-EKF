@@ -5,6 +5,10 @@ Source files:
 - `airbrake.kicad_sch`
 - `airbrake.kicad_pcb`
 
+Latest parsed source folder:
+
+- `C:\Users\hoffm\OneDrive\Desktop\Airbreak PCB June 1\airbrake-PCB`
+
 KiCad schematic title block:
 
 - Title: Airbrake Computer
@@ -14,6 +18,10 @@ KiCad schematic title block:
 
 This document is generated from the current V3 KiCad project and supersedes the
 older V2 screenshot notes for firmware planning.
+
+June 1 PCB update: the main sensor, radio, flash, and motor-driver pin groups
+remain consistent with the earlier V3 extract. The LED GPIO assignment changed
+and is reflected below.
 
 ## Major Parts In V3
 
@@ -134,12 +142,12 @@ Relevant TMC5240 nets:
 
 | STM32 Pin | Net |
 | --- | --- |
-| `PC13` | `/LED_1` |
-| `PC14` | `/LED_2` |
-| `PC15` | `/LED_3` |
-| `PH1` | `/LED_4` |
-| `PA0` | `/LED_5` |
-| `PA1` | `/LED_6` |
+| `PA1` | `/LED_1` |
+| `PA0` | `/LED_2` |
+| `PC3` | `/LED_3` |
+| `PC0` | `/LED_4` |
+| `PB5` | `/LED_5` |
+| `PB4` | `/LED_6` |
 | `PH0` | `/MCU_TCXO` |
 
 ## V3 Changes From Earlier BOM / V2 Assumptions

@@ -1,4 +1,5 @@
 #include "ambar_airbrake.hpp"
+#include "ambar_board_pins.hpp"
 
 #include <algorithm>
 #include <cmath>

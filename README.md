@@ -15,6 +15,7 @@ burnout, and live flight-state telemetry.
 - Flight phase tracking: pad idle, boost, coast, airbrake active, recovery, fault
 - Apogee prediction and bounded airbrake deployment command
 - Embedded-friendly interfaces with fixed-size arrays and no heap allocation
+- June 1 KiCad pin-map constants in `include/ambar_board_pins.hpp`
 
 ## Current Status
 
