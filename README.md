@@ -36,6 +36,15 @@ Before use in flight hardware, add:
 
 ## Build
 
+If you are new to code or GitHub, start here:
+[docs/beginner_quick_start.md](docs/beginner_quick_start.md).
+
+Windows one-command sandbox runner:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_sandboxes.ps1
+```
+
 ```powershell
 cmake -S . -B build
 cmake --build build
@@ -94,6 +103,8 @@ the safe/retracted state.
   datasheet facts reflected in firmware constants.
 - [docs/simulation_sandboxes.md](docs/simulation_sandboxes.md): project review
   summary and virtual sandbox instructions.
+- [docs/beginner_quick_start.md](docs/beginner_quick_start.md): plain-English
+  instructions for downloading the repo and running the sandboxes on Windows.
 
 Older V2 screenshot notes and outdated BOM mismatch notes were removed from the
 live repo so GitHub only presents the current working baseline.
