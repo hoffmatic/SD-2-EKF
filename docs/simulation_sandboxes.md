@@ -9,6 +9,19 @@ These are not final flight predictions. They are virtual workbenches for asking:
 - What happens if the airbrake actuator is slow, unhomed, or jammed?
 - What should the electronics boot checklist catch before flight logic is armed?
 
+Each sandbox now prints a test-report style log:
+
+- `Condition being tested`: the failure mode or normal case injected into the
+  virtual system.
+- `Pass rule`: the exact behavior the software is expected to show.
+- `Result`: `PASS` or `FAIL` for that scenario.
+- `Measurements` or `Detailed check log`: the values that explain the result.
+- `SUMMARY`: a compact table after the detailed logs.
+
+For these sandboxes, `PASS` means the virtual software behaved as expected for
+the injected condition. It does not mean the rocket, PCB, or airbrake mechanism
+is flight-proven.
+
 ## Project Review Summary
 
 Current strengths:
@@ -66,6 +79,9 @@ What it does:
   differ.
 - Reports true simulated apogee, target error, predicted apogee, peak command,
   peak actual deployment, rejected barometer samples, final phase, and health.
+- Prints the condition under test, the expected pass rule, full-command timing,
+  full-physical-deployment timing, and a target-calibration warning when apogee
+  is outside the +/-100 ft mission tolerance.
 
 Useful questions:
 
@@ -91,6 +107,9 @@ What it does:
 - Checks SX1280 SPI mode and BUSY behavior.
 - Checks TMC5240 SPI mode, IOIN version, and motor supply presence.
 - Checks for duplicate GPIO assignments in the board pin constants.
+- Prints one detailed log per virtual boot condition showing each chip check,
+  the expected value, the observed simulated value, and whether the boot decision
+  should be `ARMABLE_WITH_WARNINGS` or `BLOCKED`.
 
 Useful questions:
 
@@ -114,6 +133,8 @@ What it does:
 - Runs nominal, slow-motor, not-homed, and jammed scenarios.
 - Reports peak deployment, final deployment, peak current, homing state, and
   fault reason.
+- Prints first-motion time, full-deployment time, pass rule, and whether the
+  virtual actuator should fault.
 
 Useful questions:
 

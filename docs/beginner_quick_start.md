@@ -49,12 +49,13 @@ The script builds and runs everything currently useful on a normal computer:
 
 ## How To Read The Output
 
-The sandboxes print tables. You do not need to understand code to use the first
-results.
+The sandboxes print test reports. You do not need to understand code to use the
+first results.
 
-- `pass` means the virtual check looks okay.
-- `warn` means the project still has an open engineering question.
-- `fail` means that condition should block flight logic until fixed.
+- `PASS` means the software reacted the expected way for that virtual test.
+- `WARN` means the project still has an open engineering question.
+- `FAIL` means the software did not react the way the test expected.
+- `BLOCKED` means a virtual boot condition should stop flight logic or arming.
 - `cmd_%` means the software command to the airbrake.
 - `act_%` means the simulated physical airbrake position.
 - `baro_rej` means how many bad barometer readings were rejected.

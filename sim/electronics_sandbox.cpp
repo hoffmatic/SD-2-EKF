@@ -17,14 +17,25 @@ enum class Status {
     Fail
 };
 
+enum class ExpectedBootDecision {
+    ArmableWithWarnings,
+    Blocked
+};
+
 struct CheckResult {
     Status status = Status::Pass;
     std::string name;
-    std::string detail;
+    std::string condition;
+    std::string expected;
+    std::string observed;
+    std::string consequence;
 };
 
 struct BootScenario {
     std::string name;
+    std::string conditionUnderTest;
+    std::string passRule;
+    ExpectedBootDecision expectedDecision = ExpectedBootDecision::ArmableWithWarnings;
     std::uint16_t vin_mV = 12000;
     std::uint16_t logicLoad_mA = 260;
     bool bmpPresent = true;
@@ -48,6 +59,16 @@ struct BootScenario {
     std::uint8_t motorSpiMode = ambar::devices::tmc5240::kSpiMode;
     std::uint8_t motorVersion = ambar::devices::tmc5240::kExpectedIoinVersion;
     bool motorSupplyPresent = true;
+};
+
+struct BootSummary {
+    int passCount = 0;
+    int warnCount = 0;
+    int failCount = 0;
+    bool armable = false;
+    bool scenarioPassed = false;
+    std::string decisionLabel;
+    std::string resultReason;
 };
 
 char portLetter(ambar::board::GpioPort port) {
@@ -86,12 +107,51 @@ std::string hex16(std::uint16_t value) {
     return stream.str();
 }
 
+std::string yesNo(bool value) {
+    return value ? "yes" : "no";
+}
+
+std::string statusName(Status status) {
+    switch (status) {
+    case Status::Pass:
+        return "PASS";
+    case Status::Warn:
+        return "WARN";
+    case Status::Fail:
+        return "FAIL";
+    }
+    return "FAIL";
+}
+
+std::string expectedDecisionName(ExpectedBootDecision decision) {
+    switch (decision) {
+    case ExpectedBootDecision::ArmableWithWarnings:
+        return "ARMABLE_WITH_WARNINGS";
+    case ExpectedBootDecision::Blocked:
+        return "BLOCKED";
+    }
+    return "BLOCKED";
+}
+
+std::string observedDecisionName(int warnCount, int failCount) {
+    if (failCount > 0) {
+        return "BLOCKED";
+    }
+    if (warnCount > 0) {
+        return "ARMABLE_WITH_WARNINGS";
+    }
+    return "ARMABLE";
+}
+
 void addCheck(std::vector<CheckResult>& checks,
               Status status,
               const std::string& name,
-              const std::string& detail)
+              const std::string& condition,
+              const std::string& expected,
+              const std::string& observed,
+              const std::string& consequence)
 {
-    checks.push_back({status, name, detail});
+    checks.push_back({status, name, condition, expected, observed, consequence});
 }
 
 std::vector<CheckResult> checkPinCollisions() {
@@ -148,13 +208,30 @@ std::vector<CheckResult> checkPinCollisions() {
 
     std::vector<CheckResult> checks;
     if (duplicates.empty()) {
-        addCheck(checks, Status::Pass, "pin map", "no duplicate GPIO assignments in constants");
+        addCheck(
+            checks,
+            Status::Pass,
+            "STM32 GPIO map",
+            "Each named board function must own a unique MCU pin.",
+            "No duplicate GPIO names among current board constants.",
+            std::to_string(pins.size()) + " named functions checked.",
+            "No firmware pin conflict is visible from the constants."
+        );
     } else {
         std::ostringstream detail;
         for (const std::string& duplicate : duplicates) {
             detail << duplicate << " ";
         }
-        addCheck(checks, Status::Fail, "pin map", "duplicate GPIO assignments: " + detail.str());
+
+        addCheck(
+            checks,
+            Status::Fail,
+            "STM32 GPIO map",
+            "Each named board function must own a unique MCU pin.",
+            "No duplicate GPIO names among current board constants.",
+            "Duplicate pins: " + detail.str(),
+            "Firmware should block bring-up until the pin map is corrected."
+        );
     }
     return checks;
 }
@@ -171,9 +248,12 @@ std::vector<CheckResult> runBootChecks(const BootScenario& scenario) {
     addCheck(
         checks,
         inputOk && loadOk ? Status::Pass : Status::Fail,
-        "3V3 regulator",
-        "VIN=" + std::to_string(scenario.vin_mV) + "mV, load="
-            + std::to_string(scenario.logicLoad_mA) + "mA"
+        "MPM3606A 3V3 regulator",
+        "Input voltage and estimated 3V3 load must stay inside the regulator constants.",
+        "VIN 4500-21000 mV and load <= 600 mA.",
+        "VIN=" + std::to_string(scenario.vin_mV) + " mV, load="
+            + std::to_string(scenario.logicLoad_mA) + " mA.",
+        "Failing this should keep the board from arming because logic power may brown out."
     );
 
     const bool bmpOk = scenario.bmpPresent
@@ -182,8 +262,13 @@ std::vector<CheckResult> runBootChecks(const BootScenario& scenario) {
     addCheck(
         checks,
         bmpOk ? Status::Pass : Status::Fail,
-        "BMP388",
-        "addr " + hex8(scenario.bmpAddress) + ", id " + hex8(scenario.bmpChipId)
+        "BMP388 barometer",
+        "Barometer must answer at the expected I2C address and return the expected CHIP_ID.",
+        "present=yes, address 0x76, CHIP_ID 0x50.",
+        "present=" + yesNo(scenario.bmpPresent)
+            + ", address=" + hex8(scenario.bmpAddress)
+            + ", CHIP_ID=" + hex8(scenario.bmpChipId) + ".",
+        "Failing this means pressure altitude cannot be trusted for the EKF."
     );
 
     const bool imuOk = scenario.imuPresent
@@ -192,8 +277,13 @@ std::vector<CheckResult> runBootChecks(const BootScenario& scenario) {
     addCheck(
         checks,
         imuOk ? Status::Pass : Status::Fail,
-        "LSM6DSV32X",
-        "addr " + hex8(scenario.imuAddress) + ", whoami " + hex8(scenario.imuWhoAmI)
+        "LSM6DSV32X IMU",
+        "IMU must answer at the expected I2C address and return the expected WHO_AM_I value.",
+        "present=yes, address 0x6A, WHO_AM_I 0x70.",
+        "present=" + yesNo(scenario.imuPresent)
+            + ", address=" + hex8(scenario.imuAddress)
+            + ", WHO_AM_I=" + hex8(scenario.imuWhoAmI) + ".",
+        "Failing this should block flight logic because acceleration data is unavailable or wrong."
     );
 
     const bool magOk = scenario.magPresent
@@ -202,8 +292,13 @@ std::vector<CheckResult> runBootChecks(const BootScenario& scenario) {
     addCheck(
         checks,
         magOk ? Status::Pass : Status::Warn,
-        "LIS2MDL",
-        "addr " + hex8(scenario.magAddress) + ", whoami " + hex8(scenario.magWhoAmI)
+        "LIS2MDL magnetometer",
+        "Magnetometer should answer with the expected address and WHO_AM_I value.",
+        "present=yes, address 0x1E, WHO_AM_I 0x40.",
+        "present=" + yesNo(scenario.magPresent)
+            + ", address=" + hex8(scenario.magAddress)
+            + ", WHO_AM_I=" + hex8(scenario.magWhoAmI) + ".",
+        "Warning only for the current vertical EKF; make it blocking once attitude/alignment depends on it."
     );
 
     const bool flashModeOk =
@@ -216,10 +311,14 @@ std::vector<CheckResult> runBootChecks(const BootScenario& scenario) {
     addCheck(
         checks,
         flashOk ? Status::Pass : Status::Fail,
-        "W25Q64",
-        "mode " + std::to_string(scenario.flashSpiMode)
-            + ", JEDEC " + hex8(scenario.flashManufacturer)
-            + " " + hex16(scenario.flashDevice)
+        "W25Q64 flash",
+        "External flash must use a supported SPI mode and return the expected JEDEC ID.",
+        "present=yes, SPI mode 0 or 3, JEDEC 0xEF 0x4017.",
+        "present=" + yesNo(scenario.flashPresent)
+            + ", SPI mode=" + std::to_string(scenario.flashSpiMode)
+            + ", JEDEC=" + hex8(scenario.flashManufacturer)
+            + " " + hex16(scenario.flashDevice) + ".",
+        "Failing this should block flight logging and should be visible during preflight."
     );
 
     const std::size_t recordBytes = 64;
@@ -229,7 +328,10 @@ std::vector<CheckResult> runBootChecks(const BootScenario& scenario) {
         checks,
         records > 100000U ? Status::Pass : Status::Warn,
         "flash log capacity",
-        std::to_string(records) + " virtual 64-byte records before wear strategy"
+        "Flash geometry should leave enough room for many fixed-size telemetry records.",
+        "More than 100000 virtual 64-byte records before wear strategy.",
+        std::to_string(records) + " records available from the current W25Q64 constants.",
+        "A warning means the logging plan needs adjustment before long-duration testing."
     );
 
     const bool radioOk = scenario.radioPresent
@@ -238,18 +340,23 @@ std::vector<CheckResult> runBootChecks(const BootScenario& scenario) {
     addCheck(
         checks,
         radioOk ? Status::Pass : Status::Fail,
-        "SX1280",
-        "mode " + std::to_string(scenario.radioSpiMode)
-            + (scenario.radioBusyClears ? ", BUSY clears" : ", BUSY stuck")
+        "SX1280 radio",
+        "Radio SPI mode and BUSY handshake must match the datasheet-backed constants.",
+        "present=yes, SPI mode 0, BUSY clears.",
+        "present=" + yesNo(scenario.radioPresent)
+            + ", SPI mode=" + std::to_string(scenario.radioSpiMode)
+            + (scenario.radioBusyClears ? ", BUSY clears." : ", BUSY stuck."),
+        "Failing this should block telemetry bring-up and may block arming depending on final rules."
     );
 
     addCheck(
         checks,
         scenario.groundStationCompatible ? Status::Pass : Status::Warn,
-        "radio link",
-        scenario.groundStationCompatible
-            ? "ground station marked SX1280-compatible"
-            : "ground station compatibility still open"
+        "radio link compatibility",
+        "Ground station must be confirmed compatible with the SX1280 link plan.",
+        "groundStationCompatible=yes.",
+        "groundStationCompatible=" + yesNo(scenario.groundStationCompatible) + ".",
+        "Warning means hardware may boot, but the team still needs to prove telemetry link compatibility."
     );
 
     const bool motorOk = scenario.motorPresent
@@ -259,10 +366,14 @@ std::vector<CheckResult> runBootChecks(const BootScenario& scenario) {
     addCheck(
         checks,
         motorOk ? Status::Pass : Status::Fail,
-        "TMC5240",
-        "mode " + std::to_string(scenario.motorSpiMode)
-            + ", IOIN.VERSION " + hex8(scenario.motorVersion)
-            + (scenario.motorSupplyPresent ? ", VBUS present" : ", VBUS missing")
+        "TMC5240 motor driver",
+        "Motor driver must answer over SPI mode 3, report expected IOIN.VERSION, and have motor supply present.",
+        "present=yes, VBUS=yes, SPI mode 3, IOIN.VERSION 0x40.",
+        "present=" + yesNo(scenario.motorPresent)
+            + ", VBUS=" + yesNo(scenario.motorSupplyPresent)
+            + ", SPI mode=" + std::to_string(scenario.motorSpiMode)
+            + ", IOIN.VERSION=" + hex8(scenario.motorVersion) + ".",
+        "Failing this should block actuator commands and keep airbrakes retracted."
     );
 
     const std::vector<CheckResult> pinChecks = checkPinCollisions();
@@ -271,44 +382,80 @@ std::vector<CheckResult> runBootChecks(const BootScenario& scenario) {
     return checks;
 }
 
-void printScenario(const BootScenario& scenario) {
-    const std::vector<CheckResult> checks = runBootChecks(scenario);
-
-    int passCount = 0;
-    int warnCount = 0;
-    int failCount = 0;
+BootSummary summarize(const BootScenario& scenario,
+                      const std::vector<CheckResult>& checks)
+{
+    BootSummary summary{};
     for (const CheckResult& check : checks) {
         if (check.status == Status::Pass) {
-            ++passCount;
+            ++summary.passCount;
         } else if (check.status == Status::Warn) {
-            ++warnCount;
+            ++summary.warnCount;
         } else {
-            ++failCount;
+            ++summary.failCount;
         }
     }
+
+    summary.armable = summary.failCount == 0;
+    summary.decisionLabel = observedDecisionName(summary.warnCount, summary.failCount);
+
+    const bool expectedBlocked =
+        scenario.expectedDecision == ExpectedBootDecision::Blocked;
+    summary.scenarioPassed =
+        expectedBlocked ? !summary.armable : summary.armable;
+
+    if (summary.scenarioPassed && expectedBlocked) {
+        summary.resultReason = "Injected fault produced a BLOCKED boot decision.";
+    } else if (summary.scenarioPassed) {
+        summary.resultReason = "No blocking failures were found; warnings remain visible.";
+    } else if (expectedBlocked) {
+        summary.resultReason = "Injected fault did not block the boot decision.";
+    } else {
+        summary.resultReason = "Nominal board unexpectedly produced a blocking failure.";
+    }
+
+    return summary;
+}
+
+void printScenario(int index, const BootScenario& scenario) {
+    const std::vector<CheckResult> checks = runBootChecks(scenario);
+    const BootSummary summary = summarize(scenario, checks);
+
+    std::cout << "\nTEST CASE " << index << ": " << scenario.name << "\n";
+    std::cout << "Condition being tested: " << scenario.conditionUnderTest << "\n";
+    std::cout << "Pass rule: " << scenario.passRule << "\n";
+    std::cout << "Expected boot decision: "
+              << expectedDecisionName(scenario.expectedDecision) << "\n";
+    std::cout << "Observed boot decision: " << summary.decisionLabel << "\n";
+    std::cout << "Result: " << (summary.scenarioPassed ? "PASS" : "FAIL")
+              << " - " << summary.resultReason << "\n";
+    std::cout << "Check counts: PASS=" << summary.passCount
+              << ", WARN=" << summary.warnCount
+              << ", FAIL=" << summary.failCount << "\n";
+    std::cout << "Detailed check log:\n";
+
+    for (const CheckResult& check : checks) {
+        std::cout << "  [" << statusName(check.status) << "] "
+                  << check.name << "\n";
+        std::cout << "    Test:     " << check.condition << "\n";
+        std::cout << "    Expected: " << check.expected << "\n";
+        std::cout << "    Observed: " << check.observed << "\n";
+        std::cout << "    Meaning:  " << check.consequence << "\n";
+    }
+}
+
+void printSummaryRow(const BootScenario& scenario) {
+    const std::vector<CheckResult> checks = runBootChecks(scenario);
+    const BootSummary summary = summarize(scenario, checks);
 
     std::cout << std::left << std::setw(24) << scenario.name
-              << std::right << std::setw(7) << passCount
-              << std::setw(7) << warnCount
-              << std::setw(7) << failCount
-              << "  ";
-
-    bool first = true;
-    for (const CheckResult& check : checks) {
-        if (check.status == Status::Pass) {
-            continue;
-        }
-        if (!first) {
-            std::cout << " | ";
-        }
-        first = false;
-        std::cout << check.name << ": " << check.detail;
-    }
-
-    if (first) {
-        std::cout << "all checks passed";
-    }
-    std::cout << "\n";
+              << std::setw(8) << (summary.scenarioPassed ? "PASS" : "FAIL")
+              << std::setw(24) << expectedDecisionName(scenario.expectedDecision)
+              << std::setw(24) << summary.decisionLabel
+              << std::right << std::setw(7) << summary.passCount
+              << std::setw(7) << summary.warnCount
+              << std::setw(7) << summary.failCount
+              << "\n";
 }
 
 } // namespace
@@ -318,49 +465,95 @@ int main() {
 
     BootScenario nominal{};
     nominal.name = "nominal V3 board";
+    nominal.conditionUnderTest =
+        "All modeled chips respond with the current V3 constants; radio ground-station compatibility is still open.";
+    nominal.passRule =
+        "PASS if no blocking failures are found and the open radio-link item remains visible as a warning.";
+    nominal.expectedDecision = ExpectedBootDecision::ArmableWithWarnings;
     scenarios.push_back(nominal);
 
     BootScenario baroWrongAddress = nominal;
     baroWrongAddress.name = "BMP388 SDO high";
+    baroWrongAddress.conditionUnderTest =
+        "The barometer address strap is wrong, so firmware reads 0x77 instead of the expected 0x76.";
+    baroWrongAddress.passRule =
+        "PASS if the BMP388 check fails and the boot decision becomes BLOCKED.";
+    baroWrongAddress.expectedDecision = ExpectedBootDecision::Blocked;
     baroWrongAddress.bmpAddress = 0x77;
     scenarios.push_back(baroWrongAddress);
 
     BootScenario overloadedRail = nominal;
     overloadedRail.name = "3V3 overloaded";
+    overloadedRail.conditionUnderTest =
+        "The MPM3606A 3V3 rail is asked to supply 720 mA, above the modeled 600 mA continuous limit.";
+    overloadedRail.passRule =
+        "PASS if the regulator check fails and the boot decision becomes BLOCKED.";
+    overloadedRail.expectedDecision = ExpectedBootDecision::Blocked;
     overloadedRail.logicLoad_mA = 720;
     scenarios.push_back(overloadedRail);
 
     BootScenario flashMismatch = nominal;
     flashMismatch.name = "wrong flash fitted";
+    flashMismatch.conditionUnderTest =
+        "The flash chip responds with a JEDEC device ID that does not match W25Q64JV.";
+    flashMismatch.passRule =
+        "PASS if the flash check fails and the boot decision becomes BLOCKED.";
+    flashMismatch.expectedDecision = ExpectedBootDecision::Blocked;
     flashMismatch.flashDevice = 0x7017;
     scenarios.push_back(flashMismatch);
 
     BootScenario busyStuck = nominal;
     busyStuck.name = "radio BUSY stuck";
+    busyStuck.conditionUnderTest =
+        "The SX1280 BUSY pin never clears after a command.";
+    busyStuck.passRule =
+        "PASS if the radio check fails and the boot decision becomes BLOCKED.";
+    busyStuck.expectedDecision = ExpectedBootDecision::Blocked;
     busyStuck.radioBusyClears = false;
     scenarios.push_back(busyStuck);
 
     BootScenario motorNoSupply = nominal;
     motorNoSupply.name = "motor VBUS missing";
+    motorNoSupply.conditionUnderTest =
+        "The TMC5240 digital interface responds, but motor supply voltage is missing.";
+    motorNoSupply.passRule =
+        "PASS if the motor-driver check fails and the boot decision becomes BLOCKED.";
+    motorNoSupply.expectedDecision = ExpectedBootDecision::Blocked;
     motorNoSupply.motorSupplyPresent = false;
     scenarios.push_back(motorNoSupply);
 
     std::cout << "AMBAR electronics bring-up sandbox\n";
-    std::cout << "This models boot-time checks from the current V3 board constants.\n\n";
+    std::cout << "Purpose: model the startup checks firmware should run before"
+              << " trusting the current V3 PCB/chip set.\n";
+    std::cout << "PASS/FAIL meaning: PASS means the virtual boot logic made the"
+              << " expected ARMABLE/BLOCKED decision for the injected condition.\n";
+    std::cout << "WARN meaning: the board may continue in this model, but the item"
+              << " must stay visible for team review.\n";
 
+    int index = 1;
+    for (const BootScenario& scenario : scenarios) {
+        printScenario(index, scenario);
+        ++index;
+    }
+
+    std::cout << "\nSUMMARY\n";
     std::cout << std::left << std::setw(24) << "scenario"
+              << std::setw(8) << "result"
+              << std::setw(24) << "expected decision"
+              << std::setw(24) << "observed decision"
               << std::right << std::setw(7) << "pass"
               << std::setw(7) << "warn"
               << std::setw(7) << "fail"
-              << "  notes\n";
-    std::cout << std::string(106, '-') << "\n";
+              << "\n";
+    std::cout << std::string(95, '-') << "\n";
 
     for (const BootScenario& scenario : scenarios) {
-        printScenario(scenario);
+        printSummaryRow(scenario);
     }
 
-    std::cout << "\nWarnings are intentional review items; failures are boot"
-              << " conditions that should keep flight-control logic inhibited.\n";
+    std::cout << "\nNext realism upgrade: replace these direct fields with fake"
+              << " I2C/SPI transactions so future drivers can be tested against"
+              << " virtual register reads before the PCB is powered.\n";
 
     return 0;
 }
