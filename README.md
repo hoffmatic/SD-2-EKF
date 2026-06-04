@@ -18,6 +18,8 @@ burnout, and live flight-state telemetry.
 - June 1 KiCad pin-map constants in `include/ambar_board_pins.hpp`
 - Datasheet-derived device IDs, bus modes, addresses, and register constants in
   `include/ambar_device_constants.hpp`
+- Virtual sandboxes for flight behavior, electronics bring-up checks, and
+  actuator motion/fault behavior
 
 ## Current Status
 
@@ -38,15 +40,30 @@ Before use in flight hardware, add:
 cmake -S . -B build
 cmake --build build
 .\build\Debug\rocket_airbrake_ekf.exe
+.\build\Debug\sim_flight_sandbox.exe
+.\build\Debug\sim_electronics_sandbox.exe
+.\build\Debug\sim_actuator_sandbox.exe
 ```
 
 For single-config generators, the executable may be under `build/rocket_airbrake_ekf`.
+The sandbox executables may likewise be directly under `build/`.
 
 Direct compiler check, useful on Windows when CMake is not installed:
 
 ```powershell
 g++ -std=c++17 -Wall -Wextra -Wpedantic -I include src/ambar_airbrake.cpp src/main.cpp -o build\rocket_airbrake_ekf.exe
 .\build\rocket_airbrake_ekf.exe
+```
+
+Direct sandbox checks:
+
+```powershell
+g++ -std=c++17 -Wall -Wextra -Wpedantic -I include src/ambar_airbrake.cpp sim/flight_sandbox.cpp -o build\sim_flight_sandbox.exe
+g++ -std=c++17 -Wall -Wextra -Wpedantic -I include sim/electronics_sandbox.cpp -o build\sim_electronics_sandbox.exe
+g++ -std=c++17 -Wall -Wextra -Wpedantic -I include sim/actuator_sandbox.cpp -o build\sim_actuator_sandbox.exe
+.\build\sim_flight_sandbox.exe
+.\build\sim_electronics_sandbox.exe
+.\build\sim_actuator_sandbox.exe
 ```
 
 ## Sensor Interface
@@ -75,6 +92,8 @@ the safe/retracted state.
   component and STM32 pin map.
 - [docs/datasheet_integration_notes.md](docs/datasheet_integration_notes.md):
   datasheet facts reflected in firmware constants.
+- [docs/simulation_sandboxes.md](docs/simulation_sandboxes.md): project review
+  summary and virtual sandbox instructions.
 
 Older V2 screenshot notes and outdated BOM mismatch notes were removed from the
 live repo so GitHub only presents the current working baseline.
