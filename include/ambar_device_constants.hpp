@@ -53,6 +53,7 @@ inline constexpr std::uint8_t kGyroOutputBaseRegister = 0x22;
 inline constexpr std::uint8_t kAccelOutputBaseRegister = 0x28;
 
 // Scale factors convert signed raw sensor counts into physical units.
+inline constexpr float kAccelFullScaleG = 32.0F;
 inline constexpr float kAccelSensitivityMgPerLsbAt32g = 0.976F;
 inline constexpr float kGyroSensitivityMdpsPerLsbAt2000Dps = 70.0F;
 } // namespace lsm6dsv32x

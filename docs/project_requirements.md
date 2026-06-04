@@ -7,6 +7,11 @@ GPS/NED estimator demo.
 
 - Target apogee: 3000 ft, represented as `kTargetApogeeM`.
 - Target tolerance: +/-100 ft, represented as `kTargetToleranceM`.
+- Additional report-derived constants now live in
+  `include/ambar_project_requirements.hpp`, including 30G acceleration capacity,
+  2-hour logging duration, GPS >=5 Hz, 915 MHz report radio requirement, <=1 s
+  airbrake deployment, 500 ms response target, 5 lb airbrake mass limit, and
+  5000 ft ground-station range.
 - Baseline sensors: IMU and barometer are active inputs in the first embedded
   module. Magnetometer support belongs in the later attitude/alignment layer.
 - EKF state size: the report identifies 4 to 8 states as appropriate for AMBAR.
@@ -54,3 +59,9 @@ bench testing, simulation replay, and hardware-in-the-loop testing.
 4. Add telemetry packets for estimate, phase, command, health, and rejection
    counters.
 5. Tune noise, gating, and phase thresholds from bench and flight data.
+
+## Source-Backed Simulation Inputs
+
+See [source_backed_simulation_inputs.md](source_backed_simulation_inputs.md) for
+the current split between values pulled from the M3 report/KiCad files and
+values that are still placeholders.

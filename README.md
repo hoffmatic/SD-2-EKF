@@ -105,6 +105,9 @@ the safe/retracted state.
   summary and virtual sandbox instructions.
 - [docs/beginner_quick_start.md](docs/beginner_quick_start.md): plain-English
   instructions for downloading the repo and running the sandboxes on Windows.
+- [docs/source_backed_simulation_inputs.md](docs/source_backed_simulation_inputs.md):
+  values pulled from the M3 report/KiCad files versus values still treated as
+  placeholders.
 
 Older V2 screenshot notes and outdated BOM mismatch notes were removed from the
 live repo so GitHub only presents the current working baseline.

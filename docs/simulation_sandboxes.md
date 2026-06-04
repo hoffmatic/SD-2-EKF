@@ -28,6 +28,8 @@ Current strengths:
 
 - The estimator/controller code is compact and portable.
 - Hardware pin constants and datasheet constants are centralized.
+- M3 report-derived requirement constants are centralized in
+  `include/ambar_project_requirements.hpp`.
 - Deployment is inhibited unless estimator health, phase, altitude, time, and
   apogee checks all pass.
 - Barometer updates use innovation gating and Joseph-form covariance updates.
@@ -37,9 +39,15 @@ Current gaps:
 - No real sensor, flash, radio, or TMC5240 drivers exist yet.
 - The IMU body-axis orientation is still unknown.
 - The airbrake mechanism travel, step/mm, homing method, and current limit are
-  still placeholders.
+  still only partly known. The report gives about 1 inch of concept travel and
+  about 1.5 lead-screw rotations, but final step/mm and current limits are still
+  placeholders.
 - The apogee predictor is still ballistic and does not yet use calibrated drag.
 - The SX1280 ground-station compatibility question is still open.
+- The M3 report calls out 915 MHz radio requirements, while the current SX1280
+  hardware constants are 2.4-2.5 GHz. That is now surfaced as a warning.
+- The M3 report calls out GPS >=5 Hz, but the current airbrake PCB/firmware
+  constants do not yet prove a GPS path.
 
 ## Build All Sandboxes
 
@@ -103,8 +111,13 @@ What it does:
 - Models boot-time checks based on the current V3 board constants.
 - Checks MPM3606A input/load limits.
 - Checks BMP388, LSM6DSV32X, and LIS2MDL I2C addresses and IDs.
+- Checks LSM6DSV32X acceleration range against the M3 30G requirement.
 - Checks W25Q64 JEDEC ID and log capacity.
+- Checks two-hour log capacity against the current virtual record size.
 - Checks SX1280 SPI mode and BUSY behavior.
+- Warns on the 915 MHz report requirement vs current SX1280 2.4 GHz hardware.
+- Warns when the GPS >=5 Hz report requirement is not yet represented by
+  current hardware/software constants.
 - Checks TMC5240 SPI mode, IOIN version, and motor supply presence.
 - Checks for duplicate GPIO assignments in the board pin constants.
 - Prints one detailed log per virtual boot condition showing each chip check,
@@ -151,3 +164,5 @@ Useful questions:
 4. Add real sensor-driver unit tests once BMP388 and LSM6DSV32X drivers exist.
 5. Add hardware-in-the-loop tests that compare these virtual checks with actual
    boot telemetry from the PCB.
+6. Resolve the radio requirement mismatch: 915 MHz in the M3 report vs SX1280
+   2.4 GHz hardware.

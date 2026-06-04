@@ -1,5 +1,6 @@
 #include "ambar_board_pins.hpp"
 #include "ambar_device_constants.hpp"
+#include "ambar_project_requirements.hpp"
 
 #include <cstdint>
 #include <iomanip>
@@ -55,6 +56,8 @@ struct BootScenario {
     std::uint8_t radioSpiMode = ambar::devices::sx1280::kSpiMode;
     bool radioBusyClears = true;
     bool groundStationCompatible = false;
+    bool gpsPresent = false;
+    float gpsUpdateRate_hz = 0.0F;
     bool motorPresent = true;
     std::uint8_t motorSpiMode = ambar::devices::tmc5240::kSpiMode;
     std::uint8_t motorVersion = ambar::devices::tmc5240::kExpectedIoinVersion;
@@ -109,6 +112,12 @@ std::string hex16(std::uint16_t value) {
 
 std::string yesNo(bool value) {
     return value ? "yes" : "no";
+}
+
+std::string formatFloat(double value, int precision = 1) {
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(precision) << value;
+    return stream.str();
 }
 
 std::string statusName(Status status) {
@@ -286,6 +295,23 @@ std::vector<CheckResult> runBootChecks(const BootScenario& scenario) {
         "Failing this should block flight logic because acceleration data is unavailable or wrong."
     );
 
+    const bool imuRangeOk =
+        ambar::devices::lsm6dsv32x::kAccelFullScaleG
+        >= ambar::requirements::kFlightComputerAccelerationRating_g;
+    addCheck(
+        checks,
+        imuRangeOk ? Status::Pass : Status::Fail,
+        "IMU acceleration range",
+        "M3 FCR 5.1 says the flight computer must withstand or record at least 30G acceleration.",
+        "IMU accelerometer full-scale range >= 30G.",
+        "LSM6DSV32X full-scale constant="
+            + formatFloat(ambar::devices::lsm6dsv32x::kAccelFullScaleG)
+            + "G, requirement="
+            + formatFloat(ambar::requirements::kFlightComputerAccelerationRating_g)
+            + "G.",
+        "Failing this means the selected IMU range may saturate before the report requirement."
+    );
+
     const bool magOk = scenario.magPresent
                     && scenario.magAddress == ambar::devices::lis2mdl::kI2cAddress
                     && scenario.magWhoAmI == ambar::devices::lis2mdl::kExpectedWhoAmI;
@@ -324,14 +350,18 @@ std::vector<CheckResult> runBootChecks(const BootScenario& scenario) {
     const std::size_t recordBytes = 64;
     const std::size_t records =
         ambar::devices::w25q64jv::kTotalSizeBytes / recordBytes;
+    const double maxTwoHourRecordRate_hz =
+        static_cast<double>(records)
+      / static_cast<double>(ambar::requirements::kRequiredLogDuration_s);
     addCheck(
         checks,
-        records > 100000U ? Status::Pass : Status::Warn,
+        maxTwoHourRecordRate_hz >= 10.0 ? Status::Pass : Status::Warn,
         "flash log capacity",
-        "Flash geometry should leave enough room for many fixed-size telemetry records.",
-        "More than 100000 virtual 64-byte records before wear strategy.",
-        std::to_string(records) + " records available from the current W25Q64 constants.",
-        "A warning means the logging plan needs adjustment before long-duration testing."
+        "M3 FCR 5.8 says the flight computer shall log data for more than 2 hours.",
+        "At least 10 Hz logging for 2 hours with the current 64-byte virtual record size.",
+        std::to_string(records) + " records available; two-hour rate limit="
+            + formatFloat(maxTwoHourRecordRate_hz, 2) + " Hz before wear strategy.",
+        "If the final telemetry record is larger or faster than this, add compression, lower-rate summaries, or more storage."
     );
 
     const bool radioOk = scenario.radioPresent
@@ -353,10 +383,33 @@ std::vector<CheckResult> runBootChecks(const BootScenario& scenario) {
         checks,
         scenario.groundStationCompatible ? Status::Pass : Status::Warn,
         "radio link compatibility",
-        "Ground station must be confirmed compatible with the SX1280 link plan.",
-        "groundStationCompatible=yes.",
-        "groundStationCompatible=" + yesNo(scenario.groundStationCompatible) + ".",
-        "Warning means hardware may boot, but the team still needs to prove telemetry link compatibility."
+        "M3 FCR 5.10 and GSR 7.6 call out 915 MHz, while the current SX1280 constants are 2.4-2.5 GHz.",
+        "Either update the requirement or choose radio hardware/ground station that match.",
+        "SX1280 RF range="
+            + formatFloat(ambar::devices::sx1280::kMinRfFrequencyHz / 1000000.0, 0)
+            + "-"
+            + formatFloat(ambar::devices::sx1280::kMaxRfFrequencyHz / 1000000.0, 0)
+            + " MHz; report frequency="
+            + formatFloat(ambar::requirements::kGroundStationReportFrequency_mhz, 0)
+            + " MHz; groundStationCompatible="
+            + yesNo(scenario.groundStationCompatible) + ".",
+        "Warning means the chip may boot, but the RF plan is not yet requirement-clean."
+    );
+
+    const bool gpsOk =
+        scenario.gpsPresent
+     && scenario.gpsUpdateRate_hz >= ambar::requirements::kMinimumGpsUpdateRate_hz;
+    addCheck(
+        checks,
+        gpsOk ? Status::Pass : Status::Warn,
+        "GPS requirement",
+        "M3 FCR 5.9 requires a GPS chip update rate of 5 Hz or greater.",
+        "GPS present and update rate >= 5 Hz.",
+        "gpsPresent=" + yesNo(scenario.gpsPresent)
+            + ", gpsUpdateRate="
+            + formatFloat(scenario.gpsUpdateRate_hz, 1)
+            + " Hz.",
+        "Warning means current airbrake firmware/PCB constants do not yet prove the report GPS requirement."
     );
 
     const bool motorOk = scenario.motorPresent

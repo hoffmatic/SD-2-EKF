@@ -1,4 +1,5 @@
 #include "ambar_airbrake.hpp"
+#include "ambar_project_requirements.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -13,9 +14,9 @@ namespace {
 using ambar::Scalar;
 
 struct ActuatorConfig {
-    Scalar travel_mm = 20.0F;
+    Scalar travel_mm = ambar::requirements::kConceptFullDeployTravel_mm;
     Scalar stepsPerMm = 400.0F;
-    Scalar maxStepRate_stepsPerS = 9000.0F;
+    Scalar maxStepRate_stepsPerS = 15000.0F;
     Scalar nominalCurrent_mA = 420.0F;
     Scalar stallCurrent_mA = 1200.0F;
 };
@@ -70,6 +71,12 @@ std::string secondsOrNotReached(Scalar timestamp_s) {
 
     std::ostringstream stream;
     stream << std::fixed << std::setprecision(3) << timestamp_s << " s";
+    return stream.str();
+}
+
+std::string secondsDuration(Scalar duration_s) {
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(3) << duration_s << " s";
     return stream.str();
 }
 
@@ -230,15 +237,21 @@ ActuatorVerdict evaluateScenario(const ActuatorScenario& scenario,
 {
     switch (scenario.expectation) {
     case ActuatorExpectation::NominalMovesAndRetracts: {
+        const bool deploysWithinRequirement =
+            result.firstMotionTime_s >= 0.0F
+         && result.firstFullDeployTime_s >= 0.0F
+         && result.firstFullDeployTime_s - result.firstMotionTime_s
+            <= ambar::requirements::kAirbrakeFullDeploymentLimit_s;
         const bool pass = result.homed
                        && !result.fault
                        && result.peakDeployFraction >= 0.95F
-                       && result.finalDeployFraction <= 0.05F;
+                       && result.finalDeployFraction <= 0.05F
+                       && deploysWithinRequirement;
         return {
             pass,
             pass
-                ? "Homed actuator reached near-full deployment and returned near retracted without a fault."
-                : "Nominal actuator did not deploy/retract cleanly or produced a fault."
+                ? "Homed actuator reached near-full deployment within the M3 1-second limit and returned near retracted without a fault."
+                : "Nominal actuator did not deploy/retract cleanly, missed the 1-second limit, or produced a fault."
         };
     }
 
@@ -304,6 +317,13 @@ void printDetailedResult(int index,
               << secondsOrNotReached(result.firstMotionTime_s) << "\n";
     std::cout << "  full deploy time:   "
               << secondsOrNotReached(result.firstFullDeployTime_s) << "\n";
+    if (result.firstMotionTime_s >= 0.0F && result.firstFullDeployTime_s >= 0.0F) {
+        std::cout << "  deploy duration:    "
+                  << secondsDuration(result.firstFullDeployTime_s - result.firstMotionTime_s)
+                  << " (limit "
+                  << secondsDuration(ambar::requirements::kAirbrakeFullDeploymentLimit_s)
+                  << ")\n";
+    }
     std::cout << "  peak deployment:    " << std::setprecision(1)
               << result.peakDeployFraction * 100.0F << "%\n";
     std::cout << "  final deployment:   "
@@ -338,7 +358,7 @@ int main() {
         {
             "nominal actuator",
             "Homed actuator receives deploy, partial retract, then inhibit/retract commands.",
-            "PASS if it deploys near 100%, retracts near 0%, and never faults.",
+            "PASS if it deploys near 100% within 1 second, retracts near 0%, and never faults.",
             ActuatorExpectation::NominalMovesAndRetracts,
             true,
             false,
@@ -385,6 +405,10 @@ int main() {
     std::cout << "Virtual mechanism constants: " << config.travel_mm << " mm travel, "
               << config.stepsPerMm << " steps/mm, "
               << config.maxStepRate_stepsPerS << " steps/s nominal max.\n";
+    std::cout << "Source note: M3 report concept says full 90-degree deployment"
+              << " takes about 1 inch of vertical travel and about "
+              << ambar::requirements::kConceptLeadScrewRotationsForFullDeploy
+              << " lead-screw rotations. Step/mm and current are still placeholders.\n";
     std::cout << "PASS/FAIL meaning: PASS means the virtual actuator behaved as"
               << " expected for the injected condition, not that the mechanism"
               << " values are final.\n";
