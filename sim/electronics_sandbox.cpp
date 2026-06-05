@@ -454,8 +454,9 @@ BootSummary summarize(const BootScenario& scenario,
 
     const bool expectedBlocked =
         scenario.expectedDecision == ExpectedBootDecision::Blocked;
-    summary.scenarioPassed =
-        expectedBlocked ? !summary.armable : summary.armable;
+    summary.scenarioPassed = expectedBlocked
+        ? !summary.armable
+        : (summary.armable && summary.warnCount > 0);
 
     if (summary.scenarioPassed && expectedBlocked) {
         summary.resultReason = "Injected fault produced a BLOCKED boot decision.";
@@ -463,6 +464,8 @@ BootSummary summarize(const BootScenario& scenario,
         summary.resultReason = "No blocking failures were found; warnings remain visible.";
     } else if (expectedBlocked) {
         summary.resultReason = "Injected fault did not block the boot decision.";
+    } else if (summary.armable) {
+        summary.resultReason = "Nominal board was armable, but expected warnings were not visible.";
     } else {
         summary.resultReason = "Nominal board unexpectedly produced a blocking failure.";
     }

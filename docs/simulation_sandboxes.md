@@ -142,7 +142,7 @@ Executable:
 What it does:
 
 - Models an airbrake actuator as a virtual stepper mechanism.
-- Uses placeholder travel of 20 mm and 400 steps/mm.
+- Uses report-backed concept travel of 25.4 mm and placeholder 400 steps/mm.
 - Runs nominal, slow-motor, not-homed, and jammed scenarios.
 - Reports peak deployment, final deployment, peak current, homing state, and
   fault reason.
