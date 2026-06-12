@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light">
+  <title>AMBAR Simulation Console</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <header class="topbar">
+      <div class="brand-block">
+        <div class="brand-mark" aria-hidden="true">A</div>
+        <div>
+          <div class="brand-name">AMBAR Simulation Console</div>
+          <div class="brand-version">Project AMBAR</div>
+        </div>
+      </div>
+
+      <div class="command-bar">
+        <button id="run-all" class="button button-primary" type="button">
+          <span class="button-icon" aria-hidden="true">▶</span>
+          <span>Run All</span>
+        </button>
+        <button id="run-suite" class="button button-secondary" type="button">
+          <span class="button-icon" aria-hidden="true">▷</span>
+          <span>Run Suite</span>
+        </button>
+        <label class="toggle-control" title="Recompile before running">
+          <input id="rebuild-toggle" type="checkbox">
+          <span class="toggle-track" aria-hidden="true"><span></span></span>
+          <span>Rebuild</span>
+        </label>
+      </div>
+
+      <div class="run-meta">
+        <div class="meta-item">
+          <span class="meta-label">Last run</span>
+          <span id="last-run">Not run in UI</span>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">Build</span>
+          <span id="build-status" class="status-inline status-ready">Ready</span>
+        </div>
+        <div class="meta-item meta-git">
+          <span class="meta-label">Git</span>
+          <span>main</span>
+        </div>
+      </div>
+    </header>
+
+    <aside class="sidebar" aria-label="Simulation navigation">
+      <nav id="navigation" class="navigation">
+        <button class="nav-item selected" data-view="overview" type="button">
+          <span class="nav-icon" aria-hidden="true">⌂</span><span>Overview</span>
+        </button>
+        <button class="nav-item" data-view="flight" type="button">
+          <span class="nav-icon" aria-hidden="true">↟</span><span>Flight</span>
+        </button>
+        <button class="nav-item" data-view="electronics" type="button">
+          <span class="nav-icon" aria-hidden="true">▣</span><span>Electronics</span>
+        </button>
+        <button class="nav-item" data-view="actuator" type="button">
+          <span class="nav-icon" aria-hidden="true">⌁</span><span>Actuator</span>
+        </button>
+        <button class="nav-item" data-view="sources" type="button">
+          <span class="nav-icon" aria-hidden="true">▤</span><span>Sources</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <button id="raw-nav" class="nav-item" type="button">
+          <span class="nav-icon" aria-hidden="true">›_</span><span>Raw Output</span>
+        </button>
+        <a class="nav-item" href="https://github.com/hoffmatic/SD-2-EKF" target="_blank" rel="noreferrer">
+          <span class="nav-icon" aria-hidden="true">↗</span><span>GitHub</span>
+        </a>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <section id="summary-section" class="summary-section">
+        <div class="section-heading-row">
+          <div>
+            <h1>Readiness Summary</h1>
+            <p id="summary-subtitle">Reviewed baseline results. Run the suite to refresh from the local executables.</p>
+          </div>
+          <span id="data-mode" class="data-mode">Baseline snapshot</span>
+        </div>
+        <div id="summary-band" class="summary-band"></div>
+        <div id="open-findings" class="open-findings"></div>
+      </section>
+
+      <section id="suite-content" class="suite-content" aria-live="polite"></section>
+      <section id="sources-content" class="sources-content hidden"></section>
+    </main>
+
+    <aside id="inspector" class="inspector" aria-label="Scenario details">
+      <div class="inspector-header">
+        <div>
+          <div class="inspector-kicker">Scenario Details</div>
+          <h2 id="inspector-title">Baseline</h2>
+        </div>
+        <button id="close-inspector" class="icon-button" type="button" title="Close details" aria-label="Close details">×</button>
+      </div>
+      <div id="inspector-body" class="inspector-body"></div>
+    </aside>
+
+    <section id="console-panel" class="console-panel collapsed" aria-label="Raw output console">
+      <button id="console-toggle" class="console-header" type="button" aria-expanded="false">
+        <span><span class="console-icon" aria-hidden="true">›_</span> Raw Output Console</span>
+        <span id="console-chevron" aria-hidden="true">⌃</span>
+      </button>
+      <div class="console-toolbar">
+        <span id="console-run-meta">No live run captured</span>
+        <div class="console-actions">
+          <button id="copy-output" class="icon-text-button" type="button" title="Copy raw output">Copy</button>
+          <button id="download-output" class="icon-text-button" type="button" title="Download raw output">Download</button>
+          <button id="clear-output" class="icon-text-button" type="button" title="Clear raw output">Clear</button>
+        </div>
+      </div>
+      <pre id="raw-output">Run a simulation suite to view the complete terminal output here.</pre>
+    </section>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

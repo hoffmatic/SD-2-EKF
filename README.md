@@ -45,6 +45,16 @@ Windows one-command sandbox runner:
 powershell -ExecutionPolicy Bypass -File .\scripts\run_sandboxes.ps1
 ```
 
+Browser simulation console:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_simulation_ui.ps1
+```
+
+The local dashboard provides Run All/Run Suite controls, scenario tables,
+details, source-gap tracking, and the complete raw terminal output. See
+[docs/simulation_ui.md](docs/simulation_ui.md).
+
 ```powershell
 cmake -S . -B build
 cmake --build build
@@ -103,6 +113,8 @@ the safe/retracted state.
   datasheet facts reflected in firmware constants.
 - [docs/simulation_sandboxes.md](docs/simulation_sandboxes.md): project review
   summary and virtual sandbox instructions.
+- [docs/simulation_ui.md](docs/simulation_ui.md): browser dashboard startup and
+  controls.
 - [docs/beginner_quick_start.md](docs/beginner_quick_start.md): plain-English
   instructions for downloading the repo and running the sandboxes on Windows.
 - [docs/source_backed_simulation_inputs.md](docs/source_backed_simulation_inputs.md):
