@@ -7,7 +7,7 @@ Source files:
 
 Latest parsed source folder:
 
-- `C:\Users\hoffm\OneDrive\Desktop\Airbreak PCB June 1\airbrake-PCB`
+- `C:\Users\hoffm\OneDrive\Desktop\PCBs\Ethan PCV V3\NewAirbrakePCB`
 
 KiCad schematic title block:
 
@@ -75,6 +75,10 @@ BMP388 is in I2C mode at address `0x76`.
 The current EKF does not require magnetometer input, but this interface can feed
 a later attitude/alignment layer or telemetry health checks. The LIS2MDL fixed
 I2C address is `0x1E`.
+
+No GPS/GNSS component or GPS net is present in the current V3 airbrake
+schematic. M5 assigns vehicle locating to independent recovery GPS hardware;
+the LIS2MDL does not replace that position/tracking function.
 
 ### Radio
 

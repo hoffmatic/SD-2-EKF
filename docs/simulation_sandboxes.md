@@ -1,6 +1,6 @@
 # Simulation Sandboxes
 
-This repo now includes three desktop sandboxes that exercise the current AMBAR
+This repo now includes four desktop sandboxes that exercise the current AMBAR
 software and hardware assumptions without needing the real PCB.
 
 These are not final flight predictions. They are virtual workbenches for asking:
@@ -28,7 +28,7 @@ Current strengths:
 
 - The estimator/controller code is compact and portable.
 - Hardware pin constants and datasheet constants are centralized.
-- M3 report-derived requirement constants are centralized in
+- M5 report-derived requirement constants are centralized in
   `include/ambar_project_requirements.hpp`.
 - Deployment is inhibited unless estimator health, phase, altitude, time, and
   apogee checks all pass.
@@ -42,12 +42,12 @@ Current gaps:
   still only partly known. The report gives about 1 inch of concept travel and
   about 1.5 lead-screw rotations, but final step/mm and current limits are still
   placeholders.
-- The apogee predictor is still ballistic and does not yet use calibrated drag.
-- The SX1280 ground-station compatibility question is still open.
-- The M3 report calls out 915 MHz radio requirements, while the current SX1280
-  hardware constants are 2.4-2.5 GHz. That is now surfaced as a warning.
-- The M3 report calls out GPS >=5 Hz, but the current airbrake PCB/firmware
-  constants do not yet prove a GPS path.
+- The embedded apogee predictor is still ballistic, although RocketPy now
+  supplies an external drag-aware physics reference.
+- Final RocketPy mass properties and drag curves remain provisional.
+- The M5 2.4 GHz requirement matches the SX1280 hardware.
+- The airbrake PCB uses a magnetometer; independent recovery GPS remains a
+  separate vehicle-level requirement.
 
 ## Build All Sandboxes
 
@@ -69,6 +69,33 @@ g++ -std=c++17 -Wall -Wextra -Wpedantic -I include src/ambar_airbrake.cpp sim/fl
 g++ -std=c++17 -Wall -Wextra -Wpedantic -I include sim/electronics_sandbox.cpp -o build\sim_electronics_sandbox.exe
 g++ -std=c++17 -Wall -Wextra -Wpedantic -I include sim/actuator_sandbox.cpp -o build\sim_actuator_sandbox.exe
 ```
+
+Run the RocketPy physics suite:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_rocketpy_sim.ps1
+```
+
+The first run installs pinned Python dependencies into the ignored local
+`.venv` directory.
+
+## RocketPy Physics Sandbox
+
+What it does:
+
+- Uses RocketPy for standard atmosphere, J420R thrust, variable motor mass,
+  aerodynamic drag, rail departure, and 6-DOF trajectory integration.
+- Feeds trajectory-derived vertical IMU and barometer measurements into the
+  real C++ `AmbarFlightComputer` through `ambar_controller_bridge`.
+- Applies the C++ deployment command to rate-limited RocketPy airbrakes.
+- Compares passive apogee against the M5 OpenRocket decision-matrix value.
+- Checks the M5 Mach and rail-exit requirements.
+- Writes machine-readable controller and trajectory data to
+  `build/rocketpy-last-run.json`.
+
+The current model is calibrated to the report's 4005 ft passive OpenRocket
+result with provisional dry mass and drag. This checks integration and behavior,
+not independent aerodynamic accuracy.
 
 ## Flight Sandbox
 
@@ -111,13 +138,13 @@ What it does:
 - Models boot-time checks based on the current V3 board constants.
 - Checks MPM3606A input/load limits.
 - Checks BMP388, LSM6DSV32X, and LIS2MDL I2C addresses and IDs.
-- Checks LSM6DSV32X acceleration range against the M3 30G requirement.
+- Checks LSM6DSV32X acceleration range against the M5 30G requirement.
 - Checks W25Q64 JEDEC ID and log capacity.
 - Checks two-hour log capacity against the current virtual record size.
 - Checks SX1280 SPI mode and BUSY behavior.
-- Warns on the 915 MHz report requirement vs current SX1280 2.4 GHz hardware.
-- Warns when the GPS >=5 Hz report requirement is not yet represented by
-  current hardware/software constants.
+- Checks the M5 2.4 GHz requirement against current SX1280 hardware.
+- Checks that the airbrake magnetometer and independent recovery GPS roles are
+  not incorrectly merged.
 - Checks TMC5240 SPI mode, IOIN version, and motor supply presence.
 - Checks for duplicate GPIO assignments in the board pin constants.
 - Prints one detailed log per virtual boot condition showing each chip check,
@@ -158,11 +185,10 @@ Useful questions:
 
 ## Next Simulation Work
 
-1. Replace placeholder motor and actuator values with final mechanical data.
-2. Import OpenRocket or measured flight profiles for replay testing.
-3. Add CSV output for plots of altitude, velocity, predicted apogee, and command.
+1. Replace RocketPy placeholder mass/inertia and actuator values with measured data.
+2. Import the final OpenRocket `.ork` and drag-vs-Mach curves for cross-validation.
+3. Add plots of altitude, velocity, predicted apogee, and command to the UI.
 4. Add real sensor-driver unit tests once BMP388 and LSM6DSV32X drivers exist.
 5. Add hardware-in-the-loop tests that compare these virtual checks with actual
    boot telemetry from the PCB.
-6. Resolve the radio requirement mismatch: 915 MHz in the M3 report vs SX1280
-   2.4 GHz hardware.
+6. Verify the separate recovery GPS hardware and ground station outside this repo.

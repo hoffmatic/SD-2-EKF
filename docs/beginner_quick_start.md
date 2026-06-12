@@ -27,7 +27,7 @@ That gives you a local copy of the project on your computer. If the team updates
 GitHub later and you are not using Git yet, repeat the same download steps to get
 the newest copy.
 
-## The Easiest Way To Run The Sandboxes On Windows
+## The Easiest Way To Run Every Simulation On Windows
 
 1. Open the project folder you downloaded.
 2. Hold `Shift`, right-click an empty spot in the folder, and choose
@@ -35,17 +35,38 @@ the newest copy.
 3. Copy and paste this command:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_sandboxes.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\run_all_simulations.ps1
 ```
 
 4. Press Enter.
 
-The script builds and runs everything currently useful on a normal computer:
+The first run may take a few minutes because it creates a private Python
+environment inside the project and installs RocketPy. The script then builds
+and runs everything currently useful on a normal computer:
 
 - `rocket_airbrake_ekf.exe`: small demo of the flight computer logic.
 - `sim_flight_sandbox.exe`: simulated rocket flight behavior.
 - `sim_electronics_sandbox.exe`: virtual PCB/electronics bring-up checks.
 - `sim_actuator_sandbox.exe`: virtual airbrake motor and jam/fault behavior.
+- `RocketPy physics sandbox`: a six-degree-of-freedom rocket trajectory whose
+  virtual airbrakes are commanded by the real C++ AMBAR estimator/controller.
+
+## The Easiest Way To Use The Visual Interface
+
+1. In the same PowerShell window, run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_simulation_ui.ps1
+```
+
+2. Open `http://127.0.0.1:8765` in a browser.
+3. Click `RocketPy Physics` to view that simulation.
+4. Click `Run This Suite` to rerun it, or `Run All` to run every sandbox.
+
+The visual interface labels each condition, pass rule, measurement, warning,
+and result. A RocketPy pass means the software and provisional physics model
+behaved as specified. It does not certify the final rocket until measured mass,
+inertia, center of gravity, and airbrake drag data replace the placeholders.
 
 ## How To Read The Output
 
@@ -64,6 +85,13 @@ These are not flight predictions yet. They are virtual workbenches for catching
 obvious software, sensor, electronics, and actuator problems before touching real
 hardware.
 
+## Magnetometer And GPS
+
+The current V3 airbrake PCB contains an LIS2MDL magnetometer and does not contain
+a GPS receiver. The magnetometer measures magnetic-field direction; it cannot
+measure geographic position and is not a functional replacement for GPS. The
+M5 report still requires a separate GPS device in the rocket recovery system.
+
 ## What To Open First
 
 - `README.md`: the front page of the project.
@@ -71,6 +99,8 @@ hardware.
 - `docs\hardware_map.md`: how the current PCB parts and STM32 pins map to code.
 - `docs\datasheet_integration_notes.md`: datasheet facts reflected in code.
 - `docs\simulation_sandboxes.md`: deeper explanation of the sandboxes.
+- `docs\sensor_architecture.md`: why the magnetometer and recovery GPS are
+  separate subsystems.
 
 ## If Something Fails
 

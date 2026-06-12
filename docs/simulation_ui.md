@@ -1,7 +1,7 @@
 # Simulation Console UI
 
 The browser-based AMBAR Simulation Console runs the existing C++ sandbox
-executables and presents their output as scenario tables, status summaries,
+executables plus the RocketPy physics backend and presents their output as scenario tables, status summaries,
 details, source gaps, and a raw terminal log.
 
 ## Start The UI
@@ -21,7 +21,7 @@ http://127.0.0.1:8765
 
 ## Controls
 
-- `Run All` runs the flight, electronics, and actuator sandboxes.
+- `Run All` runs the flight, RocketPy physics, electronics, and actuator suites.
 - `Run Suite` runs only the currently selected suite.
 - `Rebuild` recompiles before running. Leave it off for faster repeat runs.
 - Select a scenario row to inspect its condition, pass rule, measurements, and
@@ -30,5 +30,5 @@ http://127.0.0.1:8765
 - `Sources` separates report/datasheet-backed facts from missing calibration
   inputs and unresolved requirements.
 
-The UI does not change the simulation math. It calls the same executables used
-by `scripts/run_sandboxes.ps1` and parses their human-readable output.
+The UI does not change the simulation math. It calls the C++ sandboxes and the
+RocketPy runner, then parses their human-readable output.

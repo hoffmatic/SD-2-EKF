@@ -19,6 +19,7 @@ enum class Status {
 };
 
 enum class ExpectedBootDecision {
+    Armable,
     ArmableWithWarnings,
     Blocked
 };
@@ -55,9 +56,9 @@ struct BootScenario {
     bool radioPresent = true;
     std::uint8_t radioSpiMode = ambar::devices::sx1280::kSpiMode;
     bool radioBusyClears = true;
-    bool groundStationCompatible = false;
-    bool gpsPresent = false;
-    float gpsUpdateRate_hz = 0.0F;
+    bool groundStationCompatible = true;
+    bool airbrakeGpsFitted = false;
+    bool recoveryGpsIndependent = true;
     bool motorPresent = true;
     std::uint8_t motorSpiMode = ambar::devices::tmc5240::kSpiMode;
     std::uint8_t motorVersion = ambar::devices::tmc5240::kExpectedIoinVersion;
@@ -134,6 +135,8 @@ std::string statusName(Status status) {
 
 std::string expectedDecisionName(ExpectedBootDecision decision) {
     switch (decision) {
+    case ExpectedBootDecision::Armable:
+        return "ARMABLE";
     case ExpectedBootDecision::ArmableWithWarnings:
         return "ARMABLE_WITH_WARNINGS";
     case ExpectedBootDecision::Blocked:
@@ -302,7 +305,7 @@ std::vector<CheckResult> runBootChecks(const BootScenario& scenario) {
         checks,
         imuRangeOk ? Status::Pass : Status::Fail,
         "IMU acceleration range",
-        "M3 FCR 5.1 says the flight computer must withstand or record at least 30G acceleration.",
+        "M5 FCR 5.1 says the flight computer must withstand or record at least 30G acceleration.",
         "IMU accelerometer full-scale range >= 30G.",
         "LSM6DSV32X full-scale constant="
             + formatFloat(ambar::devices::lsm6dsv32x::kAccelFullScaleG)
@@ -357,7 +360,7 @@ std::vector<CheckResult> runBootChecks(const BootScenario& scenario) {
         checks,
         maxTwoHourRecordRate_hz >= 10.0 ? Status::Pass : Status::Warn,
         "flash log capacity",
-        "M3 FCR 5.8 says the flight computer shall log data for more than 2 hours.",
+        "M5 FCR 5.8 says the flight computer shall log data for more than 2 hours.",
         "At least 10 Hz logging for 2 hours with the current 64-byte virtual record size.",
         std::to_string(records) + " records available; two-hour rate limit="
             + formatFloat(maxTwoHourRecordRate_hz, 2) + " Hz before wear strategy.",
@@ -383,33 +386,35 @@ std::vector<CheckResult> runBootChecks(const BootScenario& scenario) {
         checks,
         scenario.groundStationCompatible ? Status::Pass : Status::Warn,
         "radio link compatibility",
-        "M3 FCR 5.10 and GSR 7.6 call out 915 MHz, while the current SX1280 constants are 2.4-2.5 GHz.",
-        "Either update the requirement or choose radio hardware/ground station that match.",
+        "M5 FCR 5.9 and GSR 7.6 require 2.4 GHz, matching the current SX1280 RF band.",
+        "Airbrake computer and ground station both use compatible 2.4 GHz hardware.",
         "SX1280 RF range="
             + formatFloat(ambar::devices::sx1280::kMinRfFrequencyHz / 1000000.0, 0)
             + "-"
             + formatFloat(ambar::devices::sx1280::kMaxRfFrequencyHz / 1000000.0, 0)
             + " MHz; report frequency="
-            + formatFloat(ambar::requirements::kGroundStationReportFrequency_mhz, 0)
+            + formatFloat(ambar::requirements::kAirbrakeRadioFrequency_mhz, 0)
             + " MHz; groundStationCompatible="
             + yesNo(scenario.groundStationCompatible) + ".",
-        "Warning means the chip may boot, but the RF plan is not yet requirement-clean."
+        "A mismatch should remain visible before range testing and flight."
     );
 
-    const bool gpsOk =
-        scenario.gpsPresent
-     && scenario.gpsUpdateRate_hz >= ambar::requirements::kMinimumGpsUpdateRate_hz;
+    const bool sensorArchitectureOk =
+        !scenario.airbrakeGpsFitted
+        && scenario.recoveryGpsIndependent
+        && scenario.magPresent
+        && ambar::requirements::kAirbrakeComputerUsesMagnetometer
+        && ambar::requirements::kRecoverySystemRequiresIndependentGps;
     addCheck(
         checks,
-        gpsOk ? Status::Pass : Status::Warn,
-        "GPS requirement",
-        "M3 FCR 5.9 requires a GPS chip update rate of 5 Hz or greater.",
-        "GPS present and update rate >= 5 Hz.",
-        "gpsPresent=" + yesNo(scenario.gpsPresent)
-            + ", gpsUpdateRate="
-            + formatFloat(scenario.gpsUpdateRate_hz, 1)
-            + " Hz.",
-        "Warning means current airbrake firmware/PCB constants do not yet prove the report GPS requirement."
+        sensorArchitectureOk ? Status::Pass : Status::Fail,
+        "airbrake/recovery sensor architecture",
+        "M5 assigns IMU, barometer, and magnetometer to the airbrake computer while recovery GPS remains an independent vehicle subsystem.",
+        "airbrake GPS fitted=no, LIS2MDL fitted=yes, independent recovery GPS=yes.",
+        "airbrakeGpsFitted=" + yesNo(scenario.airbrakeGpsFitted)
+            + ", magnetometerPresent=" + yesNo(scenario.magPresent)
+            + ", recoveryGpsIndependent=" + yesNo(scenario.recoveryGpsIndependent) + ".",
+        "A magnetometer supports attitude/alignment; it does not provide GPS position or recovery tracking."
     );
 
     const bool motorOk = scenario.motorPresent
@@ -452,20 +457,26 @@ BootSummary summarize(const BootScenario& scenario,
     summary.armable = summary.failCount == 0;
     summary.decisionLabel = observedDecisionName(summary.warnCount, summary.failCount);
 
-    const bool expectedBlocked =
-        scenario.expectedDecision == ExpectedBootDecision::Blocked;
+    const bool expectedBlocked = scenario.expectedDecision == ExpectedBootDecision::Blocked;
+    const bool expectedWarnings = scenario.expectedDecision == ExpectedBootDecision::ArmableWithWarnings;
     summary.scenarioPassed = expectedBlocked
         ? !summary.armable
-        : (summary.armable && summary.warnCount > 0);
+        : expectedWarnings
+            ? (summary.armable && summary.warnCount > 0)
+            : (summary.armable && summary.warnCount == 0);
 
     if (summary.scenarioPassed && expectedBlocked) {
         summary.resultReason = "Injected fault produced a BLOCKED boot decision.";
-    } else if (summary.scenarioPassed) {
+    } else if (summary.scenarioPassed && expectedWarnings) {
         summary.resultReason = "No blocking failures were found; warnings remain visible.";
+    } else if (summary.scenarioPassed) {
+        summary.resultReason = "All modeled startup checks passed without warnings.";
     } else if (expectedBlocked) {
         summary.resultReason = "Injected fault did not block the boot decision.";
-    } else if (summary.armable) {
+    } else if (summary.armable && expectedWarnings) {
         summary.resultReason = "Nominal board was armable, but expected warnings were not visible.";
+    } else if (summary.armable) {
+        summary.resultReason = "Nominal board was armable, but unexpected warnings were present.";
     } else {
         summary.resultReason = "Nominal board unexpectedly produced a blocking failure.";
     }
@@ -522,10 +533,10 @@ int main() {
     BootScenario nominal{};
     nominal.name = "nominal V3 board";
     nominal.conditionUnderTest =
-        "All modeled chips respond with the current V3 constants; radio ground-station compatibility is still open.";
+        "All modeled chips respond with the V3 constants and M5 airbrake/recovery sensor roles are kept separate.";
     nominal.passRule =
-        "PASS if no blocking failures are found and the open radio-link item remains visible as a warning.";
-    nominal.expectedDecision = ExpectedBootDecision::ArmableWithWarnings;
+        "PASS if all modeled startup checks pass and the decision becomes ARMABLE without hiding the separate recovery GPS requirement.";
+    nominal.expectedDecision = ExpectedBootDecision::Armable;
     scenarios.push_back(nominal);
 
     BootScenario baroWrongAddress = nominal;

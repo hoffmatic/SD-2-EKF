@@ -1,6 +1,6 @@
 # AMBAR Project Mapping
 
-This repository now targets Project AMBAR's M3 concept rather than a generic
+This repository now targets Project AMBAR's M5 design rather than a generic
 GPS/NED estimator demo.
 
 ## Project Requirements Reflected in Code
@@ -9,11 +9,14 @@ GPS/NED estimator demo.
 - Target tolerance: +/-100 ft, represented as `kTargetToleranceM`.
 - Additional report-derived constants now live in
   `include/ambar_project_requirements.hpp`, including 30G acceleration capacity,
-  2-hour logging duration, GPS >=5 Hz, 915 MHz report radio requirement, <=1 s
+  2-hour logging duration, 2.4 GHz radio operation, <=1 s
   airbrake deployment, 500 ms response target, 5 lb airbrake mass limit, and
   5000 ft ground-station range.
-- Baseline sensors: IMU and barometer are active inputs in the first embedded
-  module. Magnetometer support belongs in the later attitude/alignment layer.
+- Airbrake sensors: the M5 report and V3 schematic identify the IMU, barometer,
+  and LIS2MDL magnetometer. The magnetometer belongs in the later
+  attitude/alignment layer and is not a position sensor.
+- Recovery tracking: M5 RR 4.12 still requires a GPS device in the independent
+  recovery system. GPS is not fitted to the current airbrake PCB.
 - EKF state size: the report identifies 4 to 8 states as appropriate for AMBAR.
   This implementation starts with the 4-state vertical estimator:
   altitude, vertical velocity, accelerometer bias, and barometer bias.
@@ -53,8 +56,8 @@ bench testing, simulation replay, and hardware-in-the-loop testing.
 
 1. Add a board support layer for the actual IMU, barometer, actuator, radio,
    logger, and scheduler.
-2. Replace the demo apogee predictor with a drag-aware model calibrated from
-   OpenRocket, ground tests, and flight logs.
+2. Replace the demo apogee predictor with an embedded drag-aware model calibrated
+   from the new RocketPy backend, final OpenRocket data, ground tests, and logs.
 3. Add unit tests and replay tests using simulated and recorded flight data.
 4. Add telemetry packets for estimate, phase, command, health, and rejection
    counters.
@@ -63,5 +66,5 @@ bench testing, simulation replay, and hardware-in-the-loop testing.
 ## Source-Backed Simulation Inputs
 
 See [source_backed_simulation_inputs.md](source_backed_simulation_inputs.md) for
-the current split between values pulled from the M3 report/KiCad files and
+the current split between values pulled from the M5 report/KiCad files and
 values that are still placeholders.

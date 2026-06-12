@@ -1,0 +1,57 @@
+{
+  "model_status": "M5 reference model with unresolved mass properties and aerodynamic calibration",
+  "environment": {
+    "latitude_deg": 28.5383,
+    "longitude_deg": -81.3792,
+    "elevation_m": 30.0,
+    "rail_length_m": 3.05,
+    "inclination_deg": 85.0,
+    "heading_deg": 90.0
+  },
+  "rocket": {
+    "radius_m": 0.0381,
+    "dry_mass_kg": 3.0,
+    "dry_inertia_kg_m2": [1.2, 1.2, 0.004],
+    "center_of_mass_without_motor_m": 1.1,
+    "power_on_drag_coefficient": 0.35,
+    "power_off_drag_coefficient": 0.35,
+    "nose_length_m": 0.45,
+    "nose_position_m": 2.15,
+    "fin_count": 4,
+    "fin_root_chord_m": 0.23,
+    "fin_tip_chord_m": 0.10,
+    "fin_span_m": 0.11,
+    "fin_position_m": 0.18
+  },
+  "motor": {
+    "name": "AeroTech J420R",
+    "thrust_curve": "j420r.eng",
+    "dry_mass_kg": 0.27328,
+    "propellant_mass_kg": 0.37632,
+    "position_m": 0.0
+  },
+  "airbrakes": {
+    "sampling_rate_hz": 100.0,
+    "maximum_rate_fraction_per_s": 1.55,
+    "drag_coefficient_at_full_deployment": 0.95,
+    "barometer_rate_hz": 50.0,
+    "barometer_std_dev_m": 1.5
+  },
+  "requirements": {
+    "target_apogee_ft": 3000.0,
+    "target_tolerance_ft": 100.0,
+    "m5_openrocket_passive_apogee_ft": 4005.0,
+    "maximum_mach": 1.0,
+    "minimum_rail_exit_velocity_fps": 52.0
+  },
+  "provenance": {
+    "rocket_diameter": "M5 report: 3-inch test vehicle",
+    "motor": "M5 report decision matrix: AeroTech J420R; thrust curve from ThrustCurve.org certified public-domain RASP data",
+    "target_apogee": "M5 SR 1.1 and AIR 6.1",
+    "passive_apogee": "M5 motor decision matrix reports 4005 ft from OpenRocket",
+    "dry_mass": "PLACEHOLDER - replace with measured flight-ready mass",
+    "inertia_and_center_of_mass": "PLACEHOLDER - replace with CAD/OpenRocket mass properties",
+    "rocket_drag": "PLACEHOLDER - calibrate from the final OpenRocket drag-vs-Mach export",
+    "airbrake_drag": "PLACEHOLDER - replace with CFD/wind-tunnel drag coefficient vs Mach and deployment"
+  }
+}

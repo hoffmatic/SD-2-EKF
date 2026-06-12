@@ -48,6 +48,12 @@ add_executable(sim_actuator_sandbox
 
 target_link_libraries(sim_actuator_sandbox PRIVATE ambar_core)
 
+add_executable(ambar_controller_bridge
+    sim/controller_bridge.cpp
+)
+
+target_link_libraries(ambar_controller_bridge PRIVATE ambar_core)
+
 # Warnings are enabled on both MSVC and GCC/Clang-style compilers because this
 # code will eventually control hardware and should be kept boringly clean.
 if(MSVC)
@@ -55,9 +61,11 @@ if(MSVC)
     target_compile_options(sim_flight_sandbox PRIVATE /W4)
     target_compile_options(sim_electronics_sandbox PRIVATE /W4)
     target_compile_options(sim_actuator_sandbox PRIVATE /W4)
+    target_compile_options(ambar_controller_bridge PRIVATE /W4)
 else()
     target_compile_options(rocket_airbrake_ekf PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(sim_flight_sandbox PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(sim_electronics_sandbox PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(sim_actuator_sandbox PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(ambar_controller_bridge PRIVATE -Wall -Wextra -Wpedantic)
 endif()

@@ -250,7 +250,7 @@ ActuatorVerdict evaluateScenario(const ActuatorScenario& scenario,
         return {
             pass,
             pass
-                ? "Homed actuator reached near-full deployment within the M3 1-second limit and returned near retracted without a fault."
+                ? "Homed actuator reached near-full deployment within the M5 1-second limit and returned near retracted without a fault."
                 : "Nominal actuator did not deploy/retract cleanly, missed the 1-second limit, or produced a fault."
         };
     }
@@ -405,7 +405,7 @@ int main() {
     std::cout << "Virtual mechanism constants: " << config.travel_mm << " mm travel, "
               << config.stepsPerMm << " steps/mm, "
               << config.maxStepRate_stepsPerS << " steps/s nominal max.\n";
-    std::cout << "Source note: M3 report concept says full 90-degree deployment"
+    std::cout << "Source note: M5 report concept says full 90-degree deployment"
               << " takes about 1 inch of vertical travel and about "
               << ambar::requirements::kConceptLeadScrewRotationsForFullDeploy
               << " lead-screw rotations. Step/mm and current are still placeholders.\n";

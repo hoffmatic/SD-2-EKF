@@ -40,7 +40,20 @@ def command_for_run(suite: str, rebuild: bool) -> list[str]:
             "-ExecutionPolicy",
             "Bypass",
             "-File",
-            str(REPO_ROOT / "scripts" / "run_sandboxes.ps1"),
+            str(REPO_ROOT / "scripts" / "run_all_simulations.ps1"),
+        ]
+        if not rebuild:
+            command.append("-SkipBuild")
+        return command
+
+    if suite == "rocketpy":
+        command = [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(REPO_ROOT / "scripts" / "run_rocketpy_sim.ps1"),
         ]
         if not rebuild:
             command.append("-SkipBuild")

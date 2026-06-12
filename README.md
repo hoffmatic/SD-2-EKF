@@ -2,7 +2,7 @@
 
 Embedded-oriented estimator and airbrake-control scaffold for Project AMBAR.
 
-The code now follows the AMBAR M3 concept report: a 3-inch test vehicle targeting
+The code now follows the AMBAR M5 report: a 3-inch test vehicle targeting
 3000 ft apogee with +/-100 ft tolerance, autonomous airbrake deployment after
 burnout, and live flight-state telemetry.
 
@@ -20,6 +20,8 @@ burnout, and live flight-state telemetry.
   `include/ambar_device_constants.hpp`
 - Virtual sandboxes for flight behavior, electronics bring-up checks, and
   actuator motion/fault behavior
+- RocketPy 1.12.1 trajectory physics using the M5-selected J420R thrust curve
+  and a persistent bridge to the real C++ estimator/controller
 
 ## Current Status
 
@@ -29,7 +31,8 @@ Before use in flight hardware, add:
 
 - Board support for the actual IMU, barometer, radio, logger, and actuator
 - IMU body-axis alignment and gravity compensation
-- A drag-aware apogee predictor calibrated from OpenRocket and flight logs
+- Final measured mass properties and drag curves for the RocketPy model
+- A drag-aware embedded apogee predictor calibrated from RocketPy/OpenRocket and flight logs
 - TMC5240 motor driver limits, current monitoring, and fail-safe behavior
 - Unit tests, simulation replay tests, and hardware-in-the-loop tests
 - Telemetry packet definitions for estimate, phase, command, and health
@@ -44,6 +47,14 @@ Windows one-command sandbox runner:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\run_sandboxes.ps1
 ```
+
+RocketPy physics simulation:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_rocketpy_sim.ps1
+```
+
+The first RocketPy run creates a local `.venv` and installs the pinned dependency.
 
 Browser simulation console:
 
@@ -62,6 +73,7 @@ cmake --build build
 .\build\Debug\sim_flight_sandbox.exe
 .\build\Debug\sim_electronics_sandbox.exe
 .\build\Debug\sim_actuator_sandbox.exe
+.\build\Debug\ambar_controller_bridge.exe
 ```
 
 For single-config generators, the executable may be under `build/rocket_airbrake_ekf`.
@@ -105,7 +117,7 @@ the safe/retracted state.
 
 ## Current Project Files
 
-- [docs/project_requirements.md](docs/project_requirements.md): AMBAR M3
+- [docs/project_requirements.md](docs/project_requirements.md): AMBAR M5
   requirements mapped to the estimator and controller.
 - [docs/hardware_map.md](docs/hardware_map.md): current June 1 V3 KiCad
   component and STM32 pin map.
@@ -118,8 +130,10 @@ the safe/retracted state.
 - [docs/beginner_quick_start.md](docs/beginner_quick_start.md): plain-English
   instructions for downloading the repo and running the sandboxes on Windows.
 - [docs/source_backed_simulation_inputs.md](docs/source_backed_simulation_inputs.md):
-  values pulled from the M3 report/KiCad files versus values still treated as
+  values pulled from the M5 report/KiCad files versus values still treated as
   placeholders.
+- [docs/sensor_architecture.md](docs/sensor_architecture.md): verified separation
+  between the airbrake magnetometer and independent recovery GPS.
 
 Older V2 screenshot notes and outdated BOM mismatch notes were removed from the
 live repo so GitHub only presents the current working baseline.

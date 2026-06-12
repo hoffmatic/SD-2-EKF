@@ -196,7 +196,7 @@ h1 { font-size: 18px; line-height: 24px; margin-bottom: 2px; }
 
 .summary-band {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   background: var(--white);
   border: 1px solid var(--border);
   border-radius: var(--radius);

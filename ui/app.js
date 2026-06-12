@@ -1,5 +1,6 @@
 const SUITE_META = {
   flight: { label: "Flight Control Suite", symbol: "↟" },
+  rocketpy: { label: "RocketPy Physics Suite", symbol: "◉" },
   electronics: { label: "Electronics Bring-up Suite", symbol: "▣" },
   actuator: { label: "Actuator Suite", symbol: "⌁" }
 };
@@ -22,11 +23,19 @@ const baselineData = {
         scenario("weak motor", "PASS", "Lower thrust and shorter burn produce a flight that should not need deployment.", "Command and deployment stay near 0%, and the phase remains Coast.", "The weak-motor flight stayed in Coast with deployment inhibited.", { "true apogee": "2042 ft", "peak command": "0.0%", "final phase": "Coast" })
       ]
     },
-    electronics: {
-      overall: "ARMABLE_WITH_WARNINGS",
-      warnings: ["915 MHz report requirement does not match SX1280 2.4-2.5 GHz hardware.", "GPS >=5 Hz requirement is not yet represented."],
+    rocketpy: {
+      overall: "PASS_WITH_MODEL_WARNINGS",
       scenarios: [
-        scenario("nominal V3 board", "PASS", "All modeled chips respond with current V3 constants.", "No blocking failures occur and open warnings remain visible.", "Observed decision: ARMABLE_WITH_WARNINGS.", { "passing checks": "10", "warnings": "2", "failures": "0" }, "WARN - radio frequency and GPS requirements remain open."),
+        scenario("M5 passive reference", "PASS", "RocketPy runs the 3-inch reference vehicle with the selected AeroTech J420R and no airbrake deployment.", "RocketPy completes and passive apogee remains within 10% of the M5 OpenRocket comparison value.", "The calibrated reference model produced about 4001 ft versus the M5 OpenRocket value of 4005 ft.", { "RocketPy passive apogee": "4001 ft", "M5 OpenRocket apogee": "4005 ft", "maximum Mach": "0.495", "rail exit velocity": "73.3 ft/s" }, "WARN - dry mass, inertia, and drag are provisional calibration values."),
+        scenario("C++ closed-loop airbrakes", "PASS", "RocketPy feeds virtual IMU/barometer measurements into the real C++ AMBAR flight computer and applies its rate-limited airbrake command.", "The estimator stays healthy, commands remain bounded, and deployment reduces apogee by more than 50 ft.", "The controller reduced the reference trajectory from about 4001 ft to 3052 ft.", { "closed-loop apogee": "3052 ft", "target error": "+52 ft", "apogee reduction": "949 ft", "peak C++ command": "100.0%", "estimator healthy": "yes" }, "PASS for the provisional reference model; this is not final flight prediction accuracy."),
+        scenario("M5 flight envelope checks", "PASS", "The closed-loop RocketPy trajectory is checked against the M5 subsonic and minimum rail-exit requirements.", "Maximum Mach is no greater than 1.0 and rail-exit velocity is at least 52 ft/s.", "The reference trajectory remained subsonic and cleared the minimum rail-exit velocity.", { "maximum Mach": "0.495", "Mach limit": "1.0", "rail exit velocity": "73.3 ft/s", "rail exit minimum": "52.0 ft/s" })
+      ]
+    },
+    electronics: {
+      overall: "ARMABLE",
+      warnings: [],
+      scenarios: [
+        scenario("nominal V3 board", "PASS", "All modeled chips respond with current V3 constants and M5 sensor roles are kept separate.", "All modeled startup checks pass and the decision becomes ARMABLE.", "Observed decision: ARMABLE.", { "passing checks": "12", "warnings": "0", "failures": "0" }, "The airbrake board uses LIS2MDL; independent recovery GPS remains a vehicle-level requirement."),
         scenario("BMP388 SDO high", "PASS", "The barometer responds at 0x77 instead of expected 0x76.", "The BMP388 check fails and boot becomes BLOCKED.", "Injected address fault produced a BLOCKED decision.", { "observed decision": "BLOCKED" }),
         scenario("3V3 overloaded", "PASS", "The 3V3 rail is modeled at 720 mA against a 600 mA limit.", "The regulator check fails and boot becomes BLOCKED.", "Injected overload produced a BLOCKED decision.", { "observed load": "720 mA", "limit": "600 mA" }),
         scenario("wrong flash fitted", "PASS", "The flash JEDEC device ID does not match W25Q64JV.", "The flash check fails and boot becomes BLOCKED.", "The wrong virtual device was detected.", { "observed decision": "BLOCKED" }),
@@ -37,7 +46,7 @@ const baselineData = {
     actuator: {
       overall: "PASS",
       scenarios: [
-        scenario("nominal actuator", "PASS", "A homed actuator receives deploy, partial retract, then inhibit commands.", "It deploys near 100% within one second, retracts, and never faults.", "Reached near-full deployment within the M3 limit and returned retracted.", { "deploy duration": "0.642 s", "limit": "1.000 s", "peak deployment": "100.0%", "peak current": "420.0 mA" }),
+        scenario("nominal actuator", "PASS", "A homed actuator receives deploy, partial retract, then inhibit commands.", "It deploys near 100% within one second, retracts, and never faults.", "Reached near-full deployment within the M5 limit and returned retracted.", { "deploy duration": "0.642 s", "limit": "1.000 s", "peak deployment": "100.0%", "peak current": "420.0 mA" }),
         scenario("slow motor", "PASS", "The motor moves at 25% of placeholder nominal step rate.", "It cannot reach full deployment during the command window but does not fault.", "The slower motor reached only partial travel.", { "peak deployment": "73.8%", "fault raised": "no" }),
         scenario("not homed", "PASS", "The actuator has not found its zero position before deployment.", "It refuses to move and raises a deploy-before-homing fault.", "Unhomed deployment was blocked.", { "peak deployment": "0.0%", "fault reason": "deploy command before homing" }),
         scenario("jam at 45 percent", "PASS", "The virtual mechanism stalls near 45% deployment.", "Travel stops near the jam and the current/fault path triggers.", "The jam stopped motion and raised the expected fault.", { "peak deployment": "45.2%", "peak current": "1200.0 mA", "fault raised": "yes" })
@@ -125,15 +134,15 @@ function renderSummary() {
   }).join("");
   el("summary-band").innerHTML = summaryItems;
   const findings = [
-    "Target calibration warnings remain",
-    "Radio: report 915 MHz, SX1280 is 2.4 GHz",
-    "GPS update path >= 5 Hz is unproven",
+    "RocketPy mass and drag values remain provisional",
+    "M5 2.4 GHz requirement matches SX1280 hardware",
+    "Recovery GPS remains separate from the airbrake magnetometer",
     "Actuator steps/mm and current are placeholders"
   ];
   el("open-findings").innerHTML = findings.map((finding) => `<span class="finding">${escapeHtml(finding)}</span>`).join("");
   el("data-mode").textContent = state.data.mode === "live" ? "Live local run" : "Baseline snapshot";
   el("summary-subtitle").textContent = state.data.mode === "live"
-    ? "Results parsed from the local C++ sandbox executables."
+    ? "Results parsed from the local C++ sandboxes and RocketPy physics backend."
     : "Reviewed baseline results. Run the suite to refresh from the local executables.";
 }
 
@@ -153,7 +162,7 @@ function renderWorkspace() {
     return;
   }
 
-  const keys = state.activeView === "overview" ? ["flight", "electronics", "actuator"] : [state.activeView];
+  const keys = state.activeView === "overview" ? ["flight", "rocketpy", "electronics", "actuator"] : [state.activeView];
   el("suite-content").innerHTML = keys.map(renderSuite).join("");
   bindScenarioRows();
 }
@@ -225,6 +234,7 @@ function renderInspector() {
 
 function whatThisProves(suite, item) {
   if (suite === "flight") return `This verifies the estimator/controller response for the injected virtual condition. It does not prove the aerodynamic model or final apogee accuracy. ${item.result}`;
+  if (suite === "rocketpy") return `This verifies RocketPy-to-C++ closed-loop integration using the versioned M5 reference model. Final prediction accuracy still depends on measured mass properties and aerodynamic data. ${item.result}`;
   if (suite === "electronics") return `This verifies the modeled boot-decision logic and constant checks. It does not measure the physical PCB, power integrity, or bus waveforms. ${item.result}`;
   return `This verifies the virtual actuator safety behavior using the current model. Final motor torque, current, travel, and timing still require bench measurements. ${item.result}`;
 }
@@ -234,18 +244,19 @@ function renderSources() {
     {
       title: "Source-backed inputs",
       rows: [
-        ["M3 project requirements", "3000 ft target, ±100 ft tolerance, deployment and logging requirements", "IN CODE", "status-pass"],
+        ["M5 project requirements", "3000 ft target, ±100 ft tolerance, 2.4 GHz radio, J420R motor selection, and separate recovery GPS", "IN CODE", "status-pass"],
         ["KiCad hardware map", "STM32H562, BMP388, LSM6DSV32X, LIS2MDL, SX1280, W25Q64, TMC5240", "LOCAL SOURCE", "status-pass"],
-        ["Device datasheets", "Addresses, chip IDs, SPI modes, memory geometry, and operating limits", "IN CODE", "status-pass"]
+        ["RocketPy physics", "RocketPy 1.12.1, certified J420R thrust curve, standard atmosphere, and real C++ controller bridge", "IN CODE", "status-pass"],
+        ["Sensor architecture", "Airbrake board uses magnetometer; recovery/tracking GPS is an independent subsystem", "VERIFIED", "status-pass"]
       ]
     },
     {
       title: "Open engineering inputs",
       rows: [
-        ["Aerodynamic model", "OpenRocket flight CSV, drag versus Mach/deployment, deployed area", "MISSING", "status-warn"],
+        ["Aerodynamic calibration", "Final OpenRocket .ork, drag versus Mach/deployment, and deployed area", "PROVISIONAL", "status-warn"],
+        ["Mass properties", "Measured flight-ready mass, center of gravity, and inertia", "PLACEHOLDER", "status-warn"],
         ["Actuator calibration", "Final step/mm, current limit, homing switch, friction, and stall threshold", "PLACEHOLDER", "status-warn"],
-        ["Radio requirement", "M3 report says 915 MHz while selected SX1280 hardware is 2.4-2.5 GHz", "MISMATCH", "status-warn"],
-        ["GPS path", "Report requires at least 5 Hz; current constants do not prove a GPS implementation", "MISSING", "status-warn"],
+        ["Recovery GPS", "Required for vehicle recovery but intentionally outside the airbrake PCB and controller", "SEPARATE SYSTEM", "status-pass"],
         ["Bench measurements", "3V3 current, I2C/SPI timing, signal integrity, and static-port response", "MISSING", "status-warn"]
       ]
     }
@@ -348,10 +359,11 @@ function parseSimulationOutput(raw, requestedSuite) {
   const data = structuredClone(baselineData);
   data.raw = raw;
   const suiteChunks = requestedSuite === "all"
-    ? {
+      ? {
         flight: between(raw, "Running sim_flight_sandbox.exe", "Running sim_electronics_sandbox.exe"),
         electronics: between(raw, "Running sim_electronics_sandbox.exe", "Running sim_actuator_sandbox.exe"),
-        actuator: raw.split("Running sim_actuator_sandbox.exe")[1] || ""
+        actuator: between(raw, "Running sim_actuator_sandbox.exe", "Running sim_rocketpy_physics"),
+        rocketpy: raw.split("Running sim_rocketpy_physics")[1] || ""
       }
     : { [requestedSuite]: raw };
 
@@ -412,6 +424,7 @@ function deriveOverall(key, chunk, scenarios) {
     const decision = chunk.match(/TEST CASE 1:[\s\S]*?Observed boot decision:\s*([^\r\n]+)/)?.[1]?.trim();
     return decision || (scenarios.every((item) => item.status === "PASS") ? "PASS" : "FAIL");
   }
+  if (key === "rocketpy") return scenarios.every((item) => item.status === "PASS") ? "PASS_WITH_MODEL_WARNINGS" : "FAIL";
   return scenarios.every((item) => item.status === "PASS") ? "PASS" : "FAIL";
 }
 
