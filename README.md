@@ -67,7 +67,8 @@ Browser simulation console:
 powershell -ExecutionPolicy Bypass -File .\scripts\run_simulation_ui.ps1
 ```
 
-The local dashboard provides Run All/Run Suite controls, scenario tables,
+The local dashboard provides Run All/Run Suite controls, adjustable RocketPy
+trade-study inputs, scenario tables,
 details, source-gap tracking, and the complete raw terminal output. See
 [docs/simulation_ui.md](docs/simulation_ui.md).
 

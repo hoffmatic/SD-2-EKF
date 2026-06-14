@@ -72,7 +72,12 @@ const state = {
   running: false,
   runStatus: "ready",
   inspectorOpen: true,
-  consoleOpen: false
+  consoleOpen: false,
+  inputFields: [],
+  inputBaseline: {},
+  inputValues: {},
+  fixedCriteria: {},
+  inputMode: "report-baseline"
 };
 
 const el = (id) => document.getElementById(id);
@@ -145,7 +150,9 @@ function renderSummary() {
     "Actuator steps/mm and current are placeholders"
   ];
   el("open-findings").innerHTML = findings.map((finding) => `<span class="finding">${escapeHtml(finding)}</span>`).join("");
-  el("data-mode").textContent = state.data.mode === "live" ? "Live local run" : "Baseline snapshot";
+  el("data-mode").textContent = state.inputMode === "experimental-overrides"
+    ? "Experimental inputs"
+    : state.data.mode === "live" ? "Live local run" : "Baseline snapshot";
   el("summary-subtitle").textContent = state.data.mode === "live"
     ? "Results parsed from the local C++ sandboxes and RocketPy physics backend."
     : "Reviewed baseline results. Run the suite to refresh from the local executables.";
@@ -153,12 +160,21 @@ function renderSummary() {
 
 function renderWorkspace() {
   const sourcesVisible = state.activeView === "sources";
-  el("summary-section").classList.toggle("hidden", sourcesVisible);
-  el("suite-content").classList.toggle("hidden", sourcesVisible);
+  const inputsVisible = state.activeView === "inputs";
+  const specialViewVisible = sourcesVisible || inputsVisible;
+  el("app").classList.toggle("workspace-wide", specialViewVisible);
+  el("summary-section").classList.toggle("hidden", specialViewVisible);
+  el("suite-content").classList.toggle("hidden", specialViewVisible);
+  el("inputs-content").classList.toggle("hidden", !inputsVisible);
   el("sources-content").classList.toggle("hidden", !sourcesVisible);
 
   if (sourcesVisible) {
     renderSources();
+    return;
+  }
+
+  if (inputsVisible) {
+    renderInputs();
     return;
   }
 
@@ -217,8 +233,9 @@ function bindScenarioRows() {
 }
 
 function renderInspector() {
-  el("inspector").classList.toggle("hidden", !state.inspectorOpen || state.activeView === "sources");
-  if (!state.inspectorOpen || state.activeView === "sources") return;
+  const specialViewVisible = state.activeView === "sources" || state.activeView === "inputs";
+  el("inspector").classList.toggle("hidden", !state.inspectorOpen || specialViewVisible);
+  if (!state.inspectorOpen || specialViewVisible) return;
 
   const suite = state.data.suites[state.selectedSuite];
   const item = suite.scenarios[state.selectedScenarioIndex] || suite.scenarios[0];
@@ -242,6 +259,114 @@ function whatThisProves(suite, item) {
   if (suite === "rocketpy") return `This verifies RocketPy-to-C++ closed-loop integration using the versioned M5 reference model. Final prediction accuracy still depends on measured mass properties and aerodynamic data. ${item.result}`;
   if (suite === "electronics") return `This verifies the modeled boot-decision logic and constant checks. It does not measure the physical PCB, power integrity, or bus waveforms. ${item.result}`;
   return `This verifies the virtual actuator safety behavior using the current model. Final motor torque, current, travel, and timing still require bench measurements. ${item.result}`;
+}
+
+function inputIsModified(fieldId) {
+  const current = Number(state.inputValues[fieldId]);
+  const baseline = Number(state.inputBaseline[fieldId]);
+  return Number.isFinite(current) && Number.isFinite(baseline) && Math.abs(current - baseline) > 1e-9;
+}
+
+function renderInputs() {
+  if (!state.inputFields.length) {
+    el("inputs-content").innerHTML = `<div class="suite-panel"><div class="loading-row"><span class="spinner"></span>Loading simulation inputs...</div></div>`;
+    return;
+  }
+
+  const groups = [...new Set(state.inputFields.map((field) => field.group))];
+  const modifiedCount = state.inputFields.filter((field) => inputIsModified(field.id)).length;
+  const criteria = state.fixedCriteria;
+  const groupMarkup = groups.map((group) => {
+    const fields = state.inputFields.filter((field) => field.group === group);
+    return `
+      <section class="input-group">
+        <header class="input-group-header"><h2>${escapeHtml(group)}</h2><span>${fields.length} controls</span></header>
+        <div class="input-list">
+          ${fields.map((field) => {
+            const modified = inputIsModified(field.id);
+            const baseline = state.inputBaseline[field.id];
+            return `
+              <label class="input-row ${modified ? "modified" : ""}" for="input-${escapeHtml(field.id)}">
+                <span class="input-description">
+                  <span class="input-label">${escapeHtml(field.label)}</span>
+                  <span class="input-source">${escapeHtml(field.source)} baseline: ${escapeHtml(baseline)} ${escapeHtml(field.unit)}</span>
+                </span>
+                <span class="number-control">
+                  <input id="input-${escapeHtml(field.id)}" data-input-id="${escapeHtml(field.id)}" type="number"
+                    value="${escapeHtml(state.inputValues[field.id])}" min="${field.minimum}" max="${field.maximum}" step="${field.step}">
+                  <span>${escapeHtml(field.unit)}</span>
+                </span>
+                <span class="input-state">${modified ? "Modified" : "Baseline"}</span>
+              </label>`;
+          }).join("")}
+        </div>
+      </section>`;
+  }).join("");
+
+  el("inputs-content").innerHTML = `
+    <div class="inputs-heading">
+      <div>
+        <h1>RocketPy Simulation Inputs</h1>
+        <p>Change one or more assumptions, then run RocketPy. These values affect only the temporary simulation run and do not rewrite the reviewed project baseline.</p>
+      </div>
+      <div class="inputs-actions">
+        <button id="reset-inputs" class="button button-secondary" type="button" ${modifiedCount ? "" : "disabled"}>Reset Baseline</button>
+        <button id="run-inputs" class="button button-primary" type="button" ${state.running ? "disabled" : ""}>Run RocketPy</button>
+      </div>
+    </div>
+    <div class="input-warning">
+      <strong>${modifiedCount ? `${modifiedCount} experimental input${modifiedCount === 1 ? "" : "s"} changed.` : "Report baseline selected."}</strong>
+      ${modifiedCount ? " Results will be labeled experimental and should be compared against the baseline, not substituted for measured data." : " Placeholder values remain provisional until replaced by measured vehicle data."}
+    </div>
+    <section class="criteria-strip" aria-label="Fixed pass and fail criteria">
+      <div><span>Maximum Mach</span><strong>${escapeHtml(criteria.maximumMach)}</strong><small>Fixed envelope limit</small></div>
+      <div><span>Minimum rail exit</span><strong>${escapeHtml(criteria.minimumRailExitVelocityFps)} ft/s</strong><small>Fixed safety criterion</small></div>
+      <div><span>M5 passive reference</span><strong>${escapeHtml(criteria.reportPassiveApogeeFt)} ft</strong><small>Comparison source</small></div>
+      <div><span>Target tolerance</span><strong>+/-${escapeHtml(criteria.targetToleranceFt)} ft</strong><small>Fixed mission criterion</small></div>
+    </section>
+    <div class="input-groups">${groupMarkup}</div>`;
+  bindInputControls();
+}
+
+function bindInputControls() {
+  document.querySelectorAll("[data-input-id]").forEach((control) => {
+    control.addEventListener("input", () => {
+      state.inputValues[control.dataset.inputId] = Number(control.value);
+      updateInputIndicators();
+    });
+    control.addEventListener("change", () => {
+      state.inputValues[control.dataset.inputId] = Number(control.value);
+      renderInputs();
+      renderRunMeta();
+    });
+  });
+  el("reset-inputs").addEventListener("click", () => {
+    state.inputValues = structuredClone(state.inputBaseline);
+    renderInputs();
+    showToast("Simulation inputs reset to the reviewed baseline.");
+  });
+  el("run-inputs").addEventListener("click", () => runSimulation("rocketpy", true));
+}
+
+function updateInputIndicators() {
+  const modifiedFields = state.inputFields.filter((field) => inputIsModified(field.id));
+  state.inputFields.forEach((field) => {
+    const control = document.querySelector(`[data-input-id="${field.id}"]`);
+    const row = control?.closest(".input-row");
+    const modified = inputIsModified(field.id);
+    row?.classList.toggle("modified", modified);
+    const indicator = row?.querySelector(".input-state");
+    if (indicator) indicator.textContent = modified ? "Modified" : "Baseline";
+  });
+  const reset = el("reset-inputs");
+  if (reset) reset.disabled = modifiedFields.length === 0;
+  const warning = document.querySelector(".input-warning");
+  if (warning) {
+    const count = modifiedFields.length;
+    warning.innerHTML = count
+      ? `<strong>${count} experimental input${count === 1 ? "" : "s"} changed.</strong> Results will be labeled experimental and should be compared against the baseline, not substituted for measured data.`
+      : "<strong>Report baseline selected.</strong> Placeholder values remain provisional until replaced by measured vehicle data.";
+  }
 }
 
 function renderSources() {
@@ -288,12 +413,12 @@ function renderConsole() {
 function renderRunMeta() {
   el("last-run").textContent = state.data.timestamp ? formatDate(state.data.timestamp) : "Not run in UI";
   const status = el("build-status");
-  const statusText = state.runStatus === "running" ? "Running" : state.runStatus === "failed" ? "Failed" : "Ready";
+  const statusText = state.runStatus === "running" ? "Running" : state.runStatus === "failed" ? "Checks failed" : "Ready";
   const statusClassName = state.runStatus === "running" ? "status-running" : state.runStatus === "failed" ? "status-failed" : "status-ready";
   status.textContent = statusText;
   status.className = `status-inline ${statusClassName}`;
   el("run-all").disabled = state.running;
-  el("run-suite").disabled = state.running || state.activeView === "overview" || state.activeView === "sources";
+  el("run-suite").disabled = state.running || state.activeView === "overview" || state.activeView === "sources" || state.activeView === "inputs";
 }
 
 function formatDate(value) {
@@ -305,18 +430,27 @@ function formatDuration(seconds) {
   return `${Number(seconds).toFixed(1)} s`;
 }
 
-async function runSimulation(suite = "all") {
+function captureInputValuesFromDom() {
+  document.querySelectorAll("[data-input-id]").forEach((control) => {
+    state.inputValues[control.dataset.inputId] = Number(control.value);
+  });
+}
+
+async function runSimulation(suite = "all", startedFromInputs = false) {
+  captureInputValuesFromDom();
   state.running = true;
   state.runStatus = "running";
   render();
   try {
+    const requestBody = { suite, rebuild: el("rebuild-toggle").checked };
+    if (suite === "all" || suite === "rocketpy") requestBody.inputs = state.inputValues;
     const response = await fetch("/api/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ suite, rebuild: el("rebuild-toggle").checked })
+      body: JSON.stringify(requestBody)
     });
     const payload = await response.json();
-    if (!response.ok || payload.exitCode !== 0) throw new Error(payload.error || `Simulation exited with code ${payload.exitCode}`);
+    if (!response.ok || !payload.output) throw new Error(payload.error || `Simulation request failed with code ${payload.exitCode}`);
     const parsed = parseSimulationOutput(payload.output, suite);
     if (suite === "all") {
       state.data = { ...parsed, mode: "live", timestamp: payload.timestamp, durationSeconds: payload.durationSeconds, raw: payload.output };
@@ -327,8 +461,18 @@ async function runSimulation(suite = "all") {
       state.data.durationSeconds = payload.durationSeconds;
       state.data.raw = payload.output;
     }
-    state.runStatus = "ready";
-    showToast(`${suite === "all" ? "All suites" : SUITE_META[suite].label} completed successfully.`);
+    state.inputMode = payload.inputMode || "report-baseline";
+    if (payload.appliedInputs) state.inputValues = structuredClone(payload.appliedInputs);
+    state.runStatus = payload.exitCode === 0 ? "ready" : "failed";
+    if (startedFromInputs) {
+      state.activeView = "rocketpy";
+      state.selectedSuite = "rocketpy";
+      state.selectedScenarioIndex = 0;
+      state.inspectorOpen = true;
+    }
+    showToast(payload.exitCode === 0
+      ? `${suite === "all" ? "All suites" : SUITE_META[suite].label} completed successfully.`
+      : "Simulation completed and reported failed engineering checks. Review the red scenarios.");
   } catch (error) {
     state.runStatus = "failed";
     state.consoleOpen = true;
@@ -344,7 +488,7 @@ async function hydrateLastRun() {
   try {
     const response = await fetch("/api/last-run", { cache: "no-store" });
     const payload = await response.json();
-    if (!response.ok || payload.exitCode !== 0 || !payload.output || !payload.suite) return;
+    if (!response.ok || !payload.output || !payload.suite) return;
 
     const parsed = parseSimulationOutput(payload.output, payload.suite);
     if (payload.suite === "all") {
@@ -356,9 +500,27 @@ async function hydrateLastRun() {
       state.data.durationSeconds = payload.durationSeconds;
       state.data.raw = payload.output;
     }
+    state.inputMode = payload.inputMode || "report-baseline";
+    if (payload.appliedInputs) state.inputValues = structuredClone(payload.appliedInputs);
+    state.runStatus = payload.exitCode === 0 ? "ready" : "failed";
     render();
   } catch {
     // The baseline snapshot remains usable if no prior local run can be loaded.
+  }
+}
+
+async function hydrateInputs() {
+  try {
+    const response = await fetch("/api/inputs", { cache: "no-store" });
+    const payload = await response.json();
+    if (!response.ok || !payload.baseline || !payload.fields) throw new Error("Input schema unavailable.");
+    state.inputBaseline = structuredClone(payload.baseline);
+    state.inputValues = structuredClone(payload.baseline);
+    state.inputFields = payload.fields;
+    state.fixedCriteria = payload.fixedCriteria || {};
+    render();
+  } catch (error) {
+    showToast(`Inputs unavailable: ${error.message}`);
   }
 }
 
@@ -485,4 +647,4 @@ function setupEvents() {
 
 setupEvents();
 render();
-hydrateLastRun();
+hydrateInputs().then(hydrateLastRun);

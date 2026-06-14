@@ -1,5 +1,6 @@
 param(
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [string]$OverridesPath
 )
 
 <#
@@ -40,7 +41,12 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "Controller bridge build failed." }
     }
 
-    & $venvPython ".\sim\rocketpy\run_rocketpy_sim.py" --bridge $bridge
+    $simulationArguments = @(".\sim\rocketpy\run_rocketpy_sim.py", "--bridge", $bridge)
+    if ($OverridesPath) {
+        $resolvedOverrides = Resolve-Path $OverridesPath
+        $simulationArguments += @("--overrides", $resolvedOverrides)
+    }
+    & $venvPython @simulationArguments
     if ($LASTEXITCODE -ne 0) { throw "RocketPy simulation failed." }
 } finally {
     Pop-Location

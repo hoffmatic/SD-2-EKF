@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import socket
 import subprocess
@@ -30,6 +31,63 @@ UI_ROOT = REPO_ROOT / "ui"
 BUILD_ROOT = REPO_ROOT / "build"
 LAST_RUN_PATH = BUILD_ROOT / "ui-last-run.json"
 SERVER_INFO_PATH = BUILD_ROOT / "ui-server.json"
+BASE_CONFIG_PATH = REPO_ROOT / "sim" / "rocketpy" / "ambar_reference_config.json"
+UI_OVERRIDES_PATH = BUILD_ROOT / "ui-rocketpy-overrides.json"
+
+FEET_TO_METERS = 0.3048
+POUNDS_TO_KG = 0.45359237
+INCHES_TO_METERS = 0.0254
+
+
+def field_spec(
+    field_id: str,
+    label: str,
+    group: str,
+    unit: str,
+    minimum: float,
+    maximum: float,
+    step: float,
+    path: tuple[str, ...],
+    source: str,
+    to_config=lambda value: value,
+    from_config=lambda value: value,
+    integer: bool = False,
+) -> dict:
+    return {
+        "id": field_id,
+        "label": label,
+        "group": group,
+        "unit": unit,
+        "minimum": minimum,
+        "maximum": maximum,
+        "step": step,
+        "path": path,
+        "source": source,
+        "to_config": to_config,
+        "from_config": from_config,
+        "integer": integer,
+    }
+
+
+INPUT_SPECS = [
+    field_spec("targetApogeeFt", "Target apogee", "Mission", "ft", 500, 12500, 10, ("requirements", "target_apogee_ft"), "Mission setting"),
+    field_spec("railLengthFt", "Rail length", "Launch", "ft", 4, 30, 0.25, ("environment", "rail_length_m"), "M5 report", lambda value: value * FEET_TO_METERS, lambda value: value / FEET_TO_METERS),
+    field_spec("launchAngleFromVerticalDeg", "Angle from vertical", "Launch", "deg", 0, 20, 0.5, ("environment", "inclination_deg"), "Launch setting", lambda value: 90.0 - value, lambda value: 90.0 - value),
+    field_spec("headingDeg", "Heading", "Launch", "deg", 0, 360, 1, ("environment", "heading_deg"), "M5 report"),
+    field_spec("dryMassLb", "Dry mass", "Vehicle", "lb", 1, 50, 0.1, ("rocket", "dry_mass_kg"), "Placeholder", lambda value: value * POUNDS_TO_KG, lambda value: value / POUNDS_TO_KG),
+    field_spec("powerOnDragCoefficient", "Power-on drag coefficient", "Vehicle", "Cd", 0.05, 2.5, 0.01, ("rocket", "power_on_drag_coefficient"), "Placeholder"),
+    field_spec("powerOffDragCoefficient", "Power-off drag coefficient", "Vehicle", "Cd", 0.05, 2.5, 0.01, ("rocket", "power_off_drag_coefficient"), "Placeholder"),
+    field_spec("finCount", "Stabilizing fins", "Vehicle", "count", 3, 8, 1, ("rocket", "fin_count"), "M5 report", integer=True),
+    field_spec("finRootChordIn", "Fin root chord", "Vehicle", "in", 1, 24, 0.1, ("rocket", "fin_root_chord_m"), "M5 report", lambda value: value * INCHES_TO_METERS, lambda value: value / INCHES_TO_METERS),
+    field_spec("finTipChordIn", "Fin tip chord", "Vehicle", "in", 0.1, 24, 0.1, ("rocket", "fin_tip_chord_m"), "M5 report", lambda value: value * INCHES_TO_METERS, lambda value: value / INCHES_TO_METERS),
+    field_spec("finSpanIn", "Fin span", "Vehicle", "in", 0.5, 20, 0.1, ("rocket", "fin_span_m"), "M5 report", lambda value: value * INCHES_TO_METERS, lambda value: value / INCHES_TO_METERS),
+    field_spec("postBurnMarginS", "Post-burn inhibit margin", "Airbrake", "s", 0, 3, 0.05, ("airbrakes", "post_burn_enable_margin_s"), "Safety setting"),
+    field_spec("maximumDeploymentRatePercentS", "Maximum deployment rate", "Airbrake", "%/s", 5, 500, 5, ("airbrakes", "maximum_rate_fraction_per_s"), "Placeholder", lambda value: value / 100.0, lambda value: value * 100.0),
+    field_spec("fullDeploymentDragCoefficient", "Full-deployment drag increment", "Airbrake", "Cd", 0, 3, 0.01, ("airbrakes", "drag_coefficient_at_full_deployment"), "Placeholder"),
+    field_spec("controllerRateHz", "Controller rate", "Sensors", "Hz", 10, 1000, 10, ("airbrakes", "sampling_rate_hz"), "Model setting"),
+    field_spec("barometerRateHz", "Barometer rate", "Sensors", "Hz", 1, 200, 1, ("airbrakes", "barometer_rate_hz"), "Model setting"),
+    field_spec("barometerStdDevFt", "Barometer standard deviation", "Sensors", "ft", 0.01, 100, 0.1, ("airbrakes", "barometer_std_dev_m"), "Placeholder", lambda value: value * FEET_TO_METERS, lambda value: value / FEET_TO_METERS),
+]
 
 SUITE_EXECUTABLES = {
     "flight": BUILD_ROOT / "sim_flight_sandbox.exe",
@@ -38,7 +96,71 @@ SUITE_EXECUTABLES = {
 }
 
 
-def command_for_run(suite: str, rebuild: bool) -> list[str]:
+def value_at_path(values: dict, path: tuple[str, ...]):
+    current = values
+    for key in path:
+        current = current[key]
+    return current
+
+
+def set_at_path(values: dict, path: tuple[str, ...], value) -> None:
+    current = values
+    for key in path[:-1]:
+        current = current.setdefault(key, {})
+    current[path[-1]] = value
+
+
+def baseline_inputs() -> dict[str, float | int]:
+    config = json.loads(BASE_CONFIG_PATH.read_text(encoding="utf-8"))
+    result = {}
+    for spec in INPUT_SPECS:
+        value = spec["from_config"](value_at_path(config, spec["path"]))
+        result[spec["id"]] = int(round(value)) if spec["integer"] else round(float(value), 6)
+    return result
+
+
+def public_input_schema() -> list[dict]:
+    private_keys = {"path", "to_config", "from_config", "integer"}
+    return [{key: value for key, value in spec.items() if key not in private_keys} for spec in INPUT_SPECS]
+
+
+def validate_inputs(requested: object) -> tuple[dict[str, float | int], dict]:
+    if requested is None:
+        requested = {}
+    if not isinstance(requested, dict):
+        raise ValueError("Simulation inputs must be a JSON object.")
+
+    specs_by_id = {spec["id"]: spec for spec in INPUT_SPECS}
+    unknown = sorted(set(requested) - set(specs_by_id))
+    if unknown:
+        raise ValueError("Unknown simulation inputs: " + ", ".join(unknown))
+
+    normalized = baseline_inputs()
+    overrides: dict = {}
+    for field_id, raw_value in requested.items():
+        spec = specs_by_id[field_id]
+        if isinstance(raw_value, bool):
+            raise ValueError(f"{spec['label']} must be numeric.")
+        try:
+            numeric = float(raw_value)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"{spec['label']} must be numeric.") from error
+        if not math.isfinite(numeric):
+            raise ValueError(f"{spec['label']} must be finite.")
+        if numeric < spec["minimum"] or numeric > spec["maximum"]:
+            raise ValueError(
+                f"{spec['label']} must be between {spec['minimum']} and {spec['maximum']} {spec['unit']}."
+            )
+        if spec["integer"] and not numeric.is_integer():
+            raise ValueError(f"{spec['label']} must be a whole number.")
+        normalized[field_id] = int(numeric) if spec["integer"] else numeric
+
+    for spec in INPUT_SPECS:
+        set_at_path(overrides, spec["path"], spec["to_config"](normalized[spec["id"]]))
+    return normalized, overrides
+
+
+def command_for_run(suite: str, rebuild: bool, overrides_path: Path | None = None) -> list[str]:
     """Map a UI suite name to the same commands used from a terminal."""
     if suite == "all":
         command = [
@@ -51,6 +173,8 @@ def command_for_run(suite: str, rebuild: bool) -> list[str]:
         ]
         if not rebuild:
             command.append("-SkipBuild")
+        if overrides_path is not None:
+            command.extend(["-OverridesPath", str(overrides_path)])
         return command
 
     if suite == "rocketpy":
@@ -64,6 +188,8 @@ def command_for_run(suite: str, rebuild: bool) -> list[str]:
         ]
         if not rebuild:
             command.append("-SkipBuild")
+        if overrides_path is not None:
+            command.extend(["-OverridesPath", str(overrides_path)])
         return command
 
     executable = SUITE_EXECUTABLES.get(suite)
@@ -126,6 +252,20 @@ class SimulationHandler(SimpleHTTPRequestHandler):
             else:
                 self.send_json({"lastRun": None})
             return
+        if self.path == "/api/inputs":
+            self.send_json(
+                {
+                    "baseline": baseline_inputs(),
+                    "fields": public_input_schema(),
+                    "fixedCriteria": {
+                        "maximumMach": 1.0,
+                        "minimumRailExitVelocityFps": 52.0,
+                        "reportPassiveApogeeFt": 3379.0,
+                        "targetToleranceFt": 100.0,
+                    },
+                }
+            )
+            return
         super().do_GET()
 
     def do_POST(self) -> None:
@@ -138,7 +278,15 @@ class SimulationHandler(SimpleHTTPRequestHandler):
             request = json.loads(self.rfile.read(content_length) or b"{}")
             suite = str(request.get("suite", "all"))
             rebuild = bool(request.get("rebuild", False))
-            command = command_for_run(suite, rebuild)
+            normalized_inputs, overrides = validate_inputs(request.get("inputs"))
+            input_mode = "report-baseline"
+            overrides_path = None
+            if normalized_inputs != baseline_inputs():
+                BUILD_ROOT.mkdir(parents=True, exist_ok=True)
+                UI_OVERRIDES_PATH.write_text(json.dumps(overrides, indent=2), encoding="utf-8")
+                overrides_path = UI_OVERRIDES_PATH
+                input_mode = "experimental-overrides"
+            command = command_for_run(suite, rebuild, overrides_path)
 
             start = time.monotonic()
             result = subprocess.run(
@@ -162,10 +310,14 @@ class SimulationHandler(SimpleHTTPRequestHandler):
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "durationSeconds": duration,
                 "output": output,
+                "inputMode": input_mode,
+                "appliedInputs": normalized_inputs,
             }
             BUILD_ROOT.mkdir(parents=True, exist_ok=True)
             LAST_RUN_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            self.send_json(payload, status=200 if result.returncode == 0 else 500)
+            # A completed simulation may legitimately fail an engineering check.
+            # Return its report normally so the UI can render the failed cases.
+            self.send_json(payload)
         except subprocess.TimeoutExpired:
             self.send_json({"error": "Simulation timed out after four minutes."}, status=504)
         except (ValueError, RuntimeError, OSError, json.JSONDecodeError) as error:

@@ -35,26 +35,43 @@ void writeOutput(const ambar::AmbarFlightComputerOutput& output) {
 int main(int argumentCount, char* arguments[]) {
     ambar::AmbarFlightComputerConfig config{};
 
-    // RocketPy supplies the selected motor's burn time plus a safety margin.
-    // Keeping this configurable avoids hard-coding one motor into the shared
-    // flight-logic library while still enforcing post-burn deployment in sim.
-    if (argumentCount == 3
-        && std::string(arguments[1]) == "--minimum-boost-time") {
+    // RocketPy supplies mission and motor values that are intentionally
+    // adjustable in trade studies. Passing them into the shared C++ config
+    // ensures the UI changes controller behavior, not only report labels.
+    for (int argumentIndex = 1; argumentIndex < argumentCount; argumentIndex += 2) {
+        if (argumentIndex + 1 >= argumentCount) {
+            std::cerr << "Missing value for " << arguments[argumentIndex] << ".\n";
+            return 2;
+        }
+
+        const std::string option = arguments[argumentIndex];
+        float value = 0.0F;
         try {
-            config.phase.minimumBoostTime_s = std::stof(arguments[2]);
+            value = std::stof(arguments[argumentIndex + 1]);
         } catch (...) {
-            std::cerr << "Invalid minimum boost time.\n";
+            std::cerr << "Invalid numeric value for " << option << ".\n";
             return 2;
         }
-        if (!std::isfinite(config.phase.minimumBoostTime_s)
-            || config.phase.minimumBoostTime_s < 0.0F) {
-            std::cerr << "Minimum boost time must be finite and nonnegative.\n";
+
+        if (!std::isfinite(value)) {
+            std::cerr << option << " must be finite.\n";
             return 2;
         }
-    } else if (argumentCount != 1) {
-        std::cerr << "Usage: ambar_controller_bridge"
-                  << " [--minimum-boost-time seconds]\n";
-        return 2;
+
+        if (option == "--minimum-boost-time" && value >= 0.0F) {
+            config.phase.minimumBoostTime_s = value;
+        } else if (option == "--target-apogee-m" && value > 0.0F) {
+            config.controller.targetApogee_m = value;
+        } else if (option == "--target-tolerance-m" && value >= 0.0F) {
+            config.controller.apogeeTolerance_m = value;
+        } else {
+            std::cerr << "Unknown option or invalid value: " << option << ".\n"
+                      << "Usage: ambar_controller_bridge"
+                      << " [--minimum-boost-time seconds]"
+                      << " [--target-apogee-m meters]"
+                      << " [--target-tolerance-m meters]\n";
+            return 2;
+        }
     }
 
     ambar::AmbarFlightComputer computer(config);

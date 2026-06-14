@@ -1,5 +1,6 @@
 param(
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [string]$OverridesPath
 )
 
 <#
@@ -25,9 +26,9 @@ try {
     Write-Host "Running sim_rocketpy_physics"
     Write-Host "============================================================"
     if ($SkipBuild) {
-        & ".\scripts\run_rocketpy_sim.ps1" -SkipBuild
+        & ".\scripts\run_rocketpy_sim.ps1" -SkipBuild -OverridesPath $OverridesPath
     } else {
-        & ".\scripts\run_rocketpy_sim.ps1"
+        & ".\scripts\run_rocketpy_sim.ps1" -OverridesPath $OverridesPath
     }
 } finally {
     Pop-Location
