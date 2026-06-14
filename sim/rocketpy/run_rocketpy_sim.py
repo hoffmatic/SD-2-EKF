@@ -52,9 +52,13 @@ class BridgeState:
 class ControllerBridge:
     """Own the persistent C++ child process and its line protocol."""
 
-    def __init__(self, executable: Path) -> None:
+    def __init__(self, executable: Path, minimum_boost_time_s: float) -> None:
         self.process = subprocess.Popen(
-            [str(executable)],
+            [
+                str(executable),
+                "--minimum-boost-time",
+                f"{minimum_boost_time_s:.6f}",
+            ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -149,7 +153,7 @@ def build_motor(config: dict[str, Any]) -> SolidMotor:
         grains_center_of_mass_position=0.1685,
         center_of_dry_mass_position=0.1685,
         nozzle_position=0.0,
-        burn_time=1.64,
+        burn_time=values["burn_time_s"],
         throat_radius=0.007,
         coordinate_system_orientation="nozzle_to_combustion_chamber",
     )
@@ -207,7 +211,11 @@ def run_closed_loop(config: dict[str, Any], bridge_path: Path) -> tuple[Flight, 
     environment = build_environment(config)
     rocket = build_rocket(config, build_motor(config))
     airbrake_config = config["airbrakes"]
-    bridge = ControllerBridge(bridge_path)
+    minimum_boost_time_s = (
+        config["motor"]["burn_time_s"]
+        + airbrake_config["post_burn_enable_margin_s"]
+    )
+    bridge = ControllerBridge(bridge_path, minimum_boost_time_s)
     log: list[dict[str, Any]] = []
     previous_time: float | None = None
     previous_velocity = 0.0
@@ -372,16 +380,58 @@ def main() -> int:
     reference_ft = requirements["m5_openrocket_passive_apogee_ft"]
     passive_difference_percent = 100.0 * (passive_apogee_ft - reference_ft) / reference_ft
     peak_command = max((entry["command_fraction"] for entry in controller_log), default=0.0)
+    minimum_command = min((entry["command_fraction"] for entry in controller_log), default=0.0)
     peak_deployment = max((entry["actual_deployment_fraction"] for entry in controller_log), default=0.0)
-    controller_healthy = all(entry["healthy"] for entry in controller_log)
+    minimum_deployment = min(
+        (entry["actual_deployment_fraction"] for entry in controller_log),
+        default=0.0,
+    )
+    commands_bounded = all(
+        0.0 <= entry["command_fraction"] <= 1.0
+        and 0.0 <= entry["actual_deployment_fraction"] <= 1.0
+        for entry in controller_log
+    )
+    controller_healthy = bool(controller_log) and all(entry["healthy"] for entry in controller_log)
+    first_command = next(
+        (entry for entry in controller_log if entry["command_fraction"] > 0.001),
+        None,
+    )
+    first_deployment = next(
+        (entry for entry in controller_log if entry["actual_deployment_fraction"] > 0.001),
+        None,
+    )
+    minimum_deploy_time_s = (
+        config["motor"]["burn_time_s"]
+        + config["airbrakes"]["post_burn_enable_margin_s"]
+    )
+    deployment_after_burn = (
+        first_command is not None
+        and first_command["time_s"] + 1.0e-9 >= minimum_deploy_time_s
+    )
+    command_phases_valid = all(
+        entry["phase"] == "AirbrakeActive"
+        for entry in controller_log
+        if entry["command_fraction"] > 0.001
+    )
     target_error_ft = closed_apogee_ft - target_ft
     apogee_reduction_ft = passive_apogee_ft - closed_apogee_ft
 
     passive_pass = abs(passive_difference_percent) <= 10.0
-    coupling_pass = controller_healthy and 0.0 <= peak_command <= 1.0 and apogee_reduction_ft > 50.0
+    coupling_pass = (
+        controller_healthy
+        and commands_bounded
+        and apogee_reduction_ft > 50.0
+        and deployment_after_burn
+        and command_phases_valid
+    )
+    maximum_mach = max(passive.max_mach_number, closed.max_mach_number)
+    minimum_rail_exit_fps = min(
+        passive.out_of_rail_velocity * MPS_TO_FPS,
+        closed.out_of_rail_velocity * MPS_TO_FPS,
+    )
     envelope_pass = (
-        closed.max_mach_number <= requirements["maximum_mach"]
-        and closed.out_of_rail_velocity * MPS_TO_FPS >= requirements["minimum_rail_exit_velocity_fps"]
+        maximum_mach <= requirements["maximum_mach"]
+        and minimum_rail_exit_fps >= requirements["minimum_rail_exit_velocity_fps"]
     )
 
     print_case(
@@ -404,15 +454,32 @@ def main() -> int:
         2,
         "C++ closed-loop airbrakes",
         "RocketPy feeds trajectory-derived IMU/barometer values to the persistent C++ AMBAR flight computer, then applies its bounded command to rate-limited virtual airbrakes.",
-        "PASS if the C++ estimator stays healthy, commands stay between 0% and 100%, and deployment reduces apogee by more than 50 ft relative to the passive reference.",
+        "PASS if the estimator stays healthy, commands remain bounded, deployment starts after motor burnout plus the configured margin, commands occur only in AirbrakeActive, and deployment reduces apogee by more than 50 ft.",
         coupling_pass,
         "The real C++ controller remained healthy and changed the RocketPy trajectory." if coupling_pass else "The C++/RocketPy coupling did not meet the declared behavior check.",
         {
             "closed-loop apogee": f"{closed_apogee_ft:.0f} ft",
             "target error": f"{target_error_ft:+.0f} ft",
             "apogee reduction": f"{apogee_reduction_ft:.0f} ft",
-            "peak C++ command": f"{peak_command * 100.0:.1f}%",
-            "peak physical deployment": f"{peak_deployment * 100.0:.1f}%",
+            "C++ command range": (
+                f"{minimum_command * 100.0:.1f}% to {peak_command * 100.0:.1f}%"
+            ),
+            "physical deployment range": (
+                f"{minimum_deployment * 100.0:.1f}% to {peak_deployment * 100.0:.1f}%"
+            ),
+            "motor burn end": f"{config['motor']['burn_time_s']:.2f} s",
+            "minimum deploy time": f"{minimum_deploy_time_s:.2f} s",
+            "first C++ command": (
+                f"{first_command['time_s']:.2f} s"
+                if first_command is not None
+                else "not reached"
+            ),
+            "first physical deployment": (
+                f"{first_deployment['time_s']:.2f} s"
+                if first_deployment is not None
+                else "not reached"
+            ),
+            "command phases valid": "yes" if command_phases_valid else "no",
             "controller samples": str(len(controller_log)),
             "estimator healthy": "yes" if controller_healthy else "no",
         },
@@ -430,9 +497,9 @@ def main() -> int:
         envelope_pass,
         "The provisional reference trajectory stayed inside both M5 envelope checks." if envelope_pass else "At least one M5 flight-envelope check failed.",
         {
-            "maximum Mach": f"{closed.max_mach_number:.3f}",
+            "maximum Mach": f"{maximum_mach:.3f}",
             "Mach limit": f"{requirements['maximum_mach']:.1f}",
-            "rail exit velocity": f"{closed.out_of_rail_velocity * MPS_TO_FPS:.1f} ft/s",
+            "minimum rail exit velocity": f"{minimum_rail_exit_fps:.1f} ft/s",
             "rail exit minimum": f"{requirements['minimum_rail_exit_velocity_fps']:.1f} ft/s",
         },
     )
@@ -454,7 +521,15 @@ def main() -> int:
                     "maxMach": closed.max_mach_number,
                     "railExitVelocityFps": closed.out_of_rail_velocity * MPS_TO_FPS,
                     "peakCommandFraction": peak_command,
+                    "minimumCommandFraction": minimum_command,
                     "peakDeploymentFraction": peak_deployment,
+                    "minimumDeploymentFraction": minimum_deployment,
+                    "commandsBounded": commands_bounded,
+                    "firstCommandTimeS": first_command["time_s"] if first_command else None,
+                    "firstDeploymentTimeS": first_deployment["time_s"] if first_deployment else None,
+                    "minimumDeploymentTimeS": minimum_deploy_time_s,
+                    "deploymentAfterBurn": deployment_after_burn,
+                    "commandPhasesValid": command_phases_valid,
                 },
                 "controllerLog": controller_log,
                 "provenance": config["provenance"],

@@ -88,6 +88,9 @@ What it does:
 - Feeds trajectory-derived vertical IMU and barometer measurements into the
   real C++ `AmbarFlightComputer` through `ambar_controller_bridge`.
 - Applies the C++ deployment command to rate-limited RocketPy airbrakes.
+- Verifies that deployment starts only after the J420R burn time plus the
+  configured post-burn margin and only while the controller reports
+  `AirbrakeActive`.
 - Compares passive apogee against the M5 OpenRocket decision-matrix value.
 - Checks the M5 Mach and rail-exit requirements.
 - Writes machine-readable controller and trajectory data to
@@ -96,6 +99,11 @@ What it does:
 The current model is calibrated to the report's 4005 ft passive OpenRocket
 result with provisional dry mass and drag. This checks integration and behavior,
 not independent aerodynamic accuracy.
+
+The June 14 audit found that the earlier model first commanded deployment at
+1.53 s, before the 1.64 s thrust-curve endpoint. The bridge now configures a
+1.74 s minimum boost interval and the suite explicitly checks this ordering.
+The corrected provisional result is 3084 ft, or +84 ft from target.
 
 ## Flight Sandbox
 
@@ -192,3 +200,6 @@ Useful questions:
 5. Add hardware-in-the-loop tests that compare these virtual checks with actual
    boot telemetry from the PCB.
 6. Verify the separate recovery GPS hardware and ground station outside this repo.
+
+See [simulation_audit.md](simulation_audit.md) for the prioritized coverage map
+and the project data needed to make each proposed simulation meaningful.

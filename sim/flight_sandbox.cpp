@@ -505,12 +505,17 @@ int main() {
               << "\n";
     std::cout << std::string(101, '-') << "\n";
 
+    bool allScenariosPassed = true;
     for (std::size_t row = 0; row < scenarios.size(); ++row) {
         printSummaryRow(scenarios[row], results[row]);
+        allScenariosPassed = allScenariosPassed
+            && evaluateScenario(scenarios[row], results[row]).pass;
     }
 
     std::cout << "\nNext calibration data needed: real drag curve, motor thrust,"
               << " venting, IMU alignment, and actuator timing from the final mechanism.\n";
 
-    return 0;
+    // The shell runner and CI can only enforce the printed verdicts if the
+    // process exit code also reports a failed scenario.
+    return allScenariosPassed ? 0 : 1;
 }

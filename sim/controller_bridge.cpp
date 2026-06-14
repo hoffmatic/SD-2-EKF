@@ -5,6 +5,7 @@
 // sends RESET/STEP/QUIT messages, and receives STATE replies. Persistence is
 // essential because the EKF and phase tracker must retain state between steps.
 
+#include <cmath>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -31,8 +32,32 @@ void writeOutput(const ambar::AmbarFlightComputerOutput& output) {
 
 } // namespace
 
-int main() {
-    ambar::AmbarFlightComputer computer;
+int main(int argumentCount, char* arguments[]) {
+    ambar::AmbarFlightComputerConfig config{};
+
+    // RocketPy supplies the selected motor's burn time plus a safety margin.
+    // Keeping this configurable avoids hard-coding one motor into the shared
+    // flight-logic library while still enforcing post-burn deployment in sim.
+    if (argumentCount == 3
+        && std::string(arguments[1]) == "--minimum-boost-time") {
+        try {
+            config.phase.minimumBoostTime_s = std::stof(arguments[2]);
+        } catch (...) {
+            std::cerr << "Invalid minimum boost time.\n";
+            return 2;
+        }
+        if (!std::isfinite(config.phase.minimumBoostTime_s)
+            || config.phase.minimumBoostTime_s < 0.0F) {
+            std::cerr << "Minimum boost time must be finite and nonnegative.\n";
+            return 2;
+        }
+    } else if (argumentCount != 1) {
+        std::cerr << "Usage: ambar_controller_bridge"
+                  << " [--minimum-boost-time seconds]\n";
+        return 2;
+    }
+
+    ambar::AmbarFlightComputer computer(config);
     computer.resetOnPad(0.0F);
 
     std::string line;

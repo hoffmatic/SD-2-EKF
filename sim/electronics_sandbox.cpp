@@ -619,13 +619,16 @@ int main() {
               << "\n";
     std::cout << std::string(95, '-') << "\n";
 
+    bool allScenariosPassed = true;
     for (const BootScenario& scenario : scenarios) {
         printSummaryRow(scenario);
+        allScenariosPassed = allScenariosPassed
+            && summarize(scenario, runBootChecks(scenario)).scenarioPassed;
     }
 
     std::cout << "\nNext realism upgrade: replace these direct fields with fake"
               << " I2C/SPI transactions so future drivers can be tested against"
               << " virtual register reads before the PCB is powered.\n";
 
-    return 0;
+    return allScenariosPassed ? 0 : 1;
 }

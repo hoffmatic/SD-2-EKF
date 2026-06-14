@@ -147,6 +147,8 @@ flow, file dependency map, and the intended use case for each executable.
   between the airbrake magnetometer and independent recovery GPS.
 - [docs/software_architecture.md](docs/software_architecture.md): how the shared
   flight core, simulations, scripts, and browser UI connect.
+- [docs/simulation_audit.md](docs/simulation_audit.md): engineering review of
+  what each simulation proves, current gaps, and recommended next simulations.
 
 Older V2 screenshot notes and outdated BOM mismatch notes were removed from the
 live repo so GitHub only presents the current working baseline.

@@ -28,10 +28,12 @@
     "thrust_curve": "j420r.eng",
     "dry_mass_kg": 0.27328,
     "propellant_mass_kg": 0.37632,
+    "burn_time_s": 1.64,
     "position_m": 0.0
   },
   "airbrakes": {
     "sampling_rate_hz": 100.0,
+    "post_burn_enable_margin_s": 0.10,
     "maximum_rate_fraction_per_s": 1.55,
     "drag_coefficient_at_full_deployment": 0.95,
     "barometer_rate_hz": 50.0,
@@ -47,6 +49,7 @@
   "provenance": {
     "rocket_diameter": "M5 report: 3-inch test vehicle",
     "motor": "M5 report decision matrix: AeroTech J420R; thrust curve from ThrustCurve.org certified public-domain RASP data",
+    "motor_burn_time": "J420R thrust-curve endpoint: 1.64 s; deployment is gated for an additional 0.10 s",
     "target_apogee": "M5 SR 1.1 and AIR 6.1",
     "passive_apogee": "M5 motor decision matrix reports 4005 ft from OpenRocket",
     "dry_mass": "PLACEHOLDER - replace with measured flight-ready mass",

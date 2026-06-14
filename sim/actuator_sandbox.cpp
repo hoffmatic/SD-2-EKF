@@ -439,12 +439,15 @@ int main() {
               << "\n";
     std::cout << std::string(88, '-') << "\n";
 
+    bool allScenariosPassed = true;
     for (std::size_t row = 0; row < scenarios.size(); ++row) {
         printSummaryRow(scenarios[row], results[row]);
+        allScenariosPassed = allScenariosPassed
+            && evaluateScenario(scenarios[row], results[row]).pass;
     }
 
     std::cout << "\nNext real data needed: final airbrake travel, step/mm,"
               << " homing switch behavior, current limit, and stall threshold.\n";
 
-    return 0;
+    return allScenariosPassed ? 0 : 1;
 }
