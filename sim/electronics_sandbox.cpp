@@ -44,7 +44,11 @@ struct BootScenario {
     std::string passRule;
     ExpectedBootDecision expectedDecision = ExpectedBootDecision::ArmableWithWarnings;
     std::uint16_t vin_mV = 12000;
-    std::uint16_t logicLoad_mA = 260;
+    // M5 power table totals approximately 430 mA for MCU, sensors, flash, and
+    // radio. The actuator driver is on the battery rail and is excluded here.
+    std::uint16_t logicLoad_mA = static_cast<std::uint16_t>(
+        ambar::requirements::kM5EstimatedPeakLogicCurrent_mA
+    );
     bool bmpPresent = true;
     std::uint8_t bmpAddress = ambar::devices::bmp388::kI2cAddress;
     std::uint8_t bmpChipId = ambar::devices::bmp388::kExpectedChipId;

@@ -28,4 +28,17 @@ inline constexpr Scalar kConceptFullDeployTravel_mm = 25.4F;
 inline constexpr Scalar kConceptLeadScrewRotationsForFullDeploy = 1.5F;
 inline constexpr Scalar kRequiredLogDuration_s = 2.0F * 60.0F * 60.0F;
 
+// June 14 M5 Critical Design Evaluation reference values. These are useful
+// comparison points, not substitutes for measured flight-ready properties.
+inline constexpr Scalar kM5OpenRocketPassiveApogee_m = 3379.0F * kFeetToMeters;
+inline constexpr Scalar kM5ExpectedMaximumVelocity_mps = 579.0F * kFeetToMeters;
+inline constexpr Scalar kM5OpenRocketMaximumMach = 0.509F;
+inline constexpr Scalar kM5OpenRocketRailExitVelocity_mps = 75.5F * kFeetToMeters;
+inline constexpr Scalar kM5AverageMorningWind_mps = 8.0F * 0.44704F;
+inline constexpr Scalar kM5AirbrakeWorstCaseForcePerFin_N = 54.8215F;
+inline constexpr Scalar kM5AirbrakeWorstCaseTotalForce_N = 219.286F;
+inline constexpr Scalar kM5AirbrakeFinArea_m2 = 0.001935F;
+inline constexpr Scalar kM5AirbrakeFinDeflectionLimit_m = 0.018F * 0.0254F;
+inline constexpr Scalar kM5EstimatedPeakLogicCurrent_mA = 430.0F;
+
 } // namespace ambar::requirements

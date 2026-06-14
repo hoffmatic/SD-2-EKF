@@ -29,11 +29,11 @@ const baselineData = {
       ]
     },
     rocketpy: {
-      overall: "PASS_WITH_MODEL_WARNINGS",
+      overall: "FAIL",
       scenarios: [
-        scenario("M5 passive reference", "PASS", "RocketPy runs the 3-inch reference vehicle with the selected AeroTech J420R and no airbrake deployment.", "RocketPy completes and passive apogee remains within 10% of the M5 OpenRocket comparison value.", "The calibrated reference model produced about 4001 ft versus the M5 OpenRocket value of 4005 ft.", { "RocketPy passive apogee": "4001 ft", "M5 OpenRocket apogee": "4005 ft", "maximum Mach": "0.495", "rail exit velocity": "73.3 ft/s" }, "WARN - dry mass, inertia, and drag are provisional calibration values."),
-        scenario("C++ closed-loop airbrakes", "PASS", "RocketPy feeds virtual IMU/barometer measurements into the real C++ AMBAR flight computer and applies its rate-limited airbrake command.", "The estimator stays healthy, commands remain bounded, deployment begins after burnout plus margin, commands occur only in AirbrakeActive, and apogee is reduced by more than 50 ft.", "The controller reduced the reference trajectory from about 4001 ft to 3084 ft without commanding before the post-burn enable time.", { "closed-loop apogee": "3084 ft", "target error": "+84 ft", "apogee reduction": "917 ft", "motor burn end": "1.64 s", "minimum deploy time": "1.74 s", "first C++ command": "1.78 s", "C++ command range": "0.0% to 100.0%", "estimator healthy": "yes" }, "PASS for the provisional reference model; this is not final flight prediction accuracy."),
-        scenario("M5 flight envelope checks", "PASS", "The closed-loop RocketPy trajectory is checked against the M5 subsonic and minimum rail-exit requirements.", "Maximum Mach is no greater than 1.0 and rail-exit velocity is at least 52 ft/s.", "The reference trajectory remained subsonic and cleared the minimum rail-exit velocity.", { "maximum Mach": "0.495", "Mach limit": "1.0", "rail exit velocity": "73.3 ft/s", "rail exit minimum": "52.0 ft/s" })
+        scenario("M5 passive reference", "FAIL", "RocketPy runs the June 14 M5 launch conditions and stabilizing-fin geometry with the selected AeroTech J420R and no airbrake deployment.", "RocketPy completes and passive apogee remains within 10% of the current 3379 ft M5 OpenRocket value.", "The provisional model predicts 3955 ft, 17.1% above the current report value.", { "RocketPy passive apogee": "3955 ft", "M5 OpenRocket apogee": "3379 ft", "difference": "+17.1%", "maximum Mach": "0.495", "rail exit velocity": "42.7 ft/s" }, "FAIL is intentional: current mass, CG, inertia, and drag data are missing, so the model was not retuned to force agreement."),
+        scenario("C++ closed-loop airbrakes", "PASS", "RocketPy feeds virtual IMU/barometer measurements into the real C++ AMBAR flight computer and applies its rate-limited airbrake command.", "The estimator stays healthy, commands remain bounded, deployment begins after burnout plus margin, commands occur only in AirbrakeActive, and apogee is reduced by more than 50 ft.", "The controller reduced this provisional trajectory from 3955 ft to 3016 ft without commanding before the post-burn enable time.", { "closed-loop apogee": "3016 ft", "target error": "+16 ft", "apogee reduction": "940 ft", "motor burn end": "1.64 s", "minimum deploy time": "1.74 s", "first C++ command": "1.78 s", "C++ command range": "0.0% to 100.0%", "estimator healthy": "yes" }, "Controller coupling passed, but target accuracy is not validated because the passive vehicle model failed its source comparison."),
+        scenario("M5 flight envelope checks", "FAIL", "The closed-loop RocketPy trajectory is checked against the M5 subsonic and minimum rail-exit requirements.", "Maximum Mach is no greater than 1.0 and rail-exit velocity is at least 52 ft/s.", "The trajectory stayed subsonic but left the 72-inch rail too slowly.", { "maximum Mach": "0.495", "Mach limit": "1.0", "minimum rail exit velocity": "42.7 ft/s", "rail exit minimum": "52.0 ft/s", "M5 reported rail exit velocity": "75.5 ft/s" })
       ]
     },
     electronics: {
@@ -249,6 +249,7 @@ function renderSources() {
     {
       title: "Source-backed inputs",
       rows: [
+        ["June 14 M5 report", "3379 ft passive apogee, 579 ft/s maximum velocity, 75.5 ft/s rail exit, launch conditions, fin geometry, airbrake loads, and 430 mA logic budget", "EXTRACTED", "status-pass"],
         ["M5 project requirements", "3000 ft target, ±100 ft tolerance, 2.4 GHz radio, J420R motor selection, and separate recovery GPS", "IN CODE", "status-pass"],
         ["KiCad hardware map", "STM32H562, BMP388, LSM6DSV32X, LIS2MDL, SX1280, W25Q64, TMC5240", "LOCAL SOURCE", "status-pass"],
         ["RocketPy physics", "RocketPy 1.12.1, certified J420R thrust curve, standard atmosphere, and real C++ controller bridge", "IN CODE", "status-pass"],
@@ -258,7 +259,8 @@ function renderSources() {
     {
       title: "Open engineering inputs",
       rows: [
-        ["Aerodynamic calibration", "Final OpenRocket .ork, drag versus Mach/deployment, and deployed area", "PROVISIONAL", "status-warn"],
+        ["OpenRocket reconstruction", "Current .ork, mass properties, component positions, and drag curves are needed to resolve 3955 ft versus 3379 ft", "FAILING", "status-warn"],
+        ["Aerodynamic calibration", "Drag versus Mach/deployment with a declared reference area", "PROVISIONAL", "status-warn"],
         ["Mass properties", "Measured flight-ready mass, center of gravity, and inertia", "PLACEHOLDER", "status-warn"],
         ["Actuator calibration", "Final step/mm, current limit, homing switch, friction, and stall threshold", "PLACEHOLDER", "status-warn"],
         ["Recovery GPS", "Required for vehicle recovery but intentionally outside the airbrake PCB and controller", "SEPARATE SYSTEM", "status-pass"],

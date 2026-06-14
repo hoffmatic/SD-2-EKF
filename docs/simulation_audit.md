@@ -18,6 +18,12 @@ Two audit defects were corrected:
    thrust curve ends at 1.64 s. The bridge now uses the motor burn time plus a
    0.10 s margin, and the pass rule checks command time and flight phase.
 
+The June 14 M5 report was subsequently extracted. It reports 3379 ft passive
+apogee for the current OpenRocket design, while the older full-report copy used
+by the original reference model reports 4005 ft. The simulation now uses 3379
+ft as the comparison target and must expose any mismatch rather than passing by
+remaining calibrated to the superseded design.
+
 ## What Each Suite Is For
 
 | Suite | Why It Exists | What It Currently Proves | What It Does Not Prove |
@@ -36,9 +42,15 @@ Two audit defects were corrected:
   maximum estimator errors are about 0.0023 m/s and 0.0012 m, which is far more
   accurate than real sensors. No noise, bias, quantization, latency, dropout,
   saturation, axis rotation, or gravity-compensation error is applied.
-- The passive RocketPy model is calibrated to 4005 ft using placeholder mass,
-  inertia, center of mass, and drag. Agreement with the M5 OpenRocket number is
-  therefore a consistency check, not independent validation.
+- The passive RocketPy model was calibrated to an older 4005 ft design using
+  placeholder mass, inertia, center of mass, and drag. The June 14 report gives
+  3379 ft for the current design. Until the current `.ork` file and mass
+  properties are available, disagreement is expected and should remain a
+  visible failed reference check.
+- The current report supplies updated launch conditions and stabilizing-fin
+  geometry, but it does not supply mass, CG, inertia, axial component positions,
+  or a reusable drag curve. Those missing values prevent independent
+  reconstruction of the OpenRocket result.
 - No Monte Carlo or parameter-dispersion run exists. One nominal result cannot
   estimate the probability of meeting the 3000 +/-100 ft requirement.
 - The embedded apogee predictor is ballistic. In the current RocketPy run its
@@ -63,6 +75,9 @@ Two audit defects were corrected:
 - The actuator model faults immediately at an injected position. It does not
   model torque margin, load versus deployment, current filtering, missed steps,
   temperature, or limit-switch failures.
+- The report calculates 54.8215 N per airbrake fin at 197.206 m/s, but separately
+  reports a 579 ft/s maximum vehicle speed. Those cases conflict and require
+  confirmation before either becomes an actuator qualification load.
 - The UI parser depends on human-readable text formatting. Machine-readable
   JSON per suite would make result ingestion less fragile.
 
@@ -109,6 +124,13 @@ unsafe command ordering. They are not yet credible for claiming a probability
 of hitting target apogee or predicting complete PCB/mechanism behavior. The
 next large increase in confidence will come from measured configuration data,
 Monte Carlo dispersion, and sensor/actuator hardware-in-the-loop tests.
+
+With the June 14 report inputs applied, the current RocketPy cross-check is
+openly failing: 3955 ft simulated passive apogee versus 3379 ft reported, and
+42.7 ft/s simulated rail exit versus the 52 ft/s requirement and 75.5 ft/s
+reported result. The controller produces 3016 ft inside that provisional model,
+but this cannot be used as target-accuracy evidence until the passive vehicle
+model is reconciled.
 
 ## Project Data Request
 

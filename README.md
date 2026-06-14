@@ -27,6 +27,11 @@ burnout, and live flight-state telemetry.
 
 This is an integration scaffold, not flight-ready software.
 
+The June 14 M5 report cross-check currently fails: RocketPy predicts 3955 ft
+passive apogee versus 3379 ft in the report and only 42.7 ft/s off the reported
+72-inch rail. This mismatch is intentionally visible until the current
+OpenRocket file, mass properties, and drag data are available.
+
 Before use in flight hardware, add:
 
 - Board support for the actual IMU, barometer, radio, logger, and actuator
@@ -143,6 +148,9 @@ flow, file dependency map, and the intended use case for each executable.
 - [docs/source_backed_simulation_inputs.md](docs/source_backed_simulation_inputs.md):
   values pulled from the M5 report/KiCad files versus values still treated as
   placeholders.
+- [docs/m5_report_data_extract.md](docs/m5_report_data_extract.md): engineering
+  values extracted from the June 14 M5 report, their confidence, and conflicts
+  with older report material.
 - [docs/sensor_architecture.md](docs/sensor_architecture.md): verified separation
   between the airbrake magnetometer and independent recovery GPS.
 - [docs/software_architecture.md](docs/software_architecture.md): how the shared

@@ -1,12 +1,12 @@
 {
-  "model_status": "M5 reference model with unresolved mass properties and aerodynamic calibration",
+  "model_status": "June 14 M5 report geometry and launch conditions with unresolved mass properties and aerodynamic calibration",
   "environment": {
-    "latitude_deg": 28.5383,
-    "longitude_deg": -81.3792,
-    "elevation_m": 30.0,
-    "rail_length_m": 3.05,
-    "inclination_deg": 85.0,
-    "heading_deg": 90.0
+    "latitude_deg": 27.93469,
+    "longitude_deg": -80.70953,
+    "elevation_m": 7.0104,
+    "rail_length_m": 1.8288,
+    "inclination_deg": 90.0,
+    "heading_deg": 225.0
   },
   "rocket": {
     "radius_m": 0.0381,
@@ -17,10 +17,10 @@
     "power_off_drag_coefficient": 0.35,
     "nose_length_m": 0.45,
     "nose_position_m": 2.15,
-    "fin_count": 4,
-    "fin_root_chord_m": 0.23,
-    "fin_tip_chord_m": 0.10,
-    "fin_span_m": 0.11,
+    "fin_count": 3,
+    "fin_root_chord_m": 0.1524,
+    "fin_tip_chord_m": 0.0508,
+    "fin_span_m": 0.0762,
     "fin_position_m": 0.18
   },
   "motor": {
@@ -42,16 +42,25 @@
   "requirements": {
     "target_apogee_ft": 3000.0,
     "target_tolerance_ft": 100.0,
-    "m5_openrocket_passive_apogee_ft": 4005.0,
+    "m5_openrocket_passive_apogee_ft": 3379.0,
     "maximum_mach": 1.0,
-    "minimum_rail_exit_velocity_fps": 52.0
+    "minimum_rail_exit_velocity_fps": 52.0,
+    "m5_reported_maximum_velocity_fps": 579.0,
+    "m5_reported_maximum_mach": 0.509,
+    "m5_reported_rail_exit_velocity_fps": 75.5
   },
   "provenance": {
+    "report_source": "Project AMBAR M5 Report, Milestone 5 Critical Design Evaluation, dated June 14, 2026",
     "rocket_diameter": "M5 report: 3-inch test vehicle",
+    "launch_site": "M5 initial-launch-condition figure: 27.93469 deg, -80.70953 deg, 23 ft elevation",
+    "launch_rail": "M5 initial-launch-condition figure: 72 in rail and 0 deg from vertical",
+    "wind": "M5 initial-launch-condition figure: 3.58 m/s average, 0.358 m/s standard deviation, 10 percent turbulence, 225 deg",
+    "stabilizing_fins": "M5 fin-flutter tables: 3 fins, 6 in root chord, 2 in tip chord, 3 in span, 0.125 in thickness",
     "motor": "M5 report decision matrix: AeroTech J420R; thrust curve from ThrustCurve.org certified public-domain RASP data",
     "motor_burn_time": "J420R thrust-curve endpoint: 1.64 s; deployment is gated for an additional 0.10 s",
     "target_apogee": "M5 SR 1.1 and AIR 6.1",
-    "passive_apogee": "M5 motor decision matrix reports 4005 ft from OpenRocket",
+    "passive_apogee": "June 14 M5 requirement-validation table reports 3379 ft; the June 11 full-report copy contains an older 4005 ft design result",
+    "airbrake_load": "M5 drag table reports 54.8215 N per fin and 219.286 N for four airbrake fins at 197.206 m/s",
     "dry_mass": "PLACEHOLDER - replace with measured flight-ready mass",
     "inertia_and_center_of_mass": "PLACEHOLDER - replace with CAD/OpenRocket mass properties",
     "rocket_drag": "PLACEHOLDER - calibrate from the final OpenRocket drag-vs-Mach export",

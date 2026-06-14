@@ -437,8 +437,8 @@ def main() -> int:
     print_case(
         1,
         "M5 passive reference",
-        "RocketPy runs the 3-inch reference vehicle with the selected AeroTech J420R and no airbrake deployment.",
-        "PASS if RocketPy completes and passive apogee is within 10% of the M5 OpenRocket decision-matrix value while final mass and drag inputs remain provisional.",
+        "RocketPy runs the June 14 M5 launch conditions and stabilizing-fin geometry with the selected AeroTech J420R and no airbrake deployment.",
+        "PASS if RocketPy completes and passive apogee is within 10% of the current 3379 ft M5 OpenRocket value while final mass and drag inputs remain provisional.",
         passive_pass,
         "RocketPy completed and the reference model stayed within the declared OpenRocket comparison band." if passive_pass else "RocketPy completed, but the reference model is outside the declared OpenRocket comparison band.",
         {
@@ -448,7 +448,7 @@ def main() -> int:
             "maximum Mach": f"{passive.max_mach_number:.3f}",
             "rail exit velocity": f"{passive.out_of_rail_velocity * MPS_TO_FPS:.1f} ft/s",
         },
-        "WARN - agreement is calibrated with placeholder dry mass and drag, not independent validation.",
+        "A mismatch is intentionally reported as FAIL. Do not retune placeholder mass or drag solely to force agreement.",
     )
     print_case(
         2,
@@ -499,8 +499,10 @@ def main() -> int:
         {
             "maximum Mach": f"{maximum_mach:.3f}",
             "Mach limit": f"{requirements['maximum_mach']:.1f}",
+            "M5 reported maximum Mach": f"{requirements['m5_reported_maximum_mach']:.3f}",
             "minimum rail exit velocity": f"{minimum_rail_exit_fps:.1f} ft/s",
             "rail exit minimum": f"{requirements['minimum_rail_exit_velocity_fps']:.1f} ft/s",
+            "M5 reported rail exit velocity": f"{requirements['m5_reported_rail_exit_velocity_fps']:.1f} ft/s",
         },
     )
 
@@ -509,6 +511,12 @@ def main() -> int:
         json.dumps(
             {
                 "modelStatus": config["model_status"],
+                "reportReference": {
+                    "passiveApogeeFt": reference_ft,
+                    "maximumVelocityFps": requirements["m5_reported_maximum_velocity_fps"],
+                    "maximumMach": requirements["m5_reported_maximum_mach"],
+                    "railExitVelocityFps": requirements["m5_reported_rail_exit_velocity_fps"],
+                },
                 "passive": {
                     "apogeeFt": passive_apogee_ft,
                     "maxMach": passive.max_mach_number,
