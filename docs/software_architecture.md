@@ -19,6 +19,8 @@ flowchart LR
     O --> A["Actuator layer or virtual airbrakes"]
 
     R["RocketPy trajectory"] --> B["controller_bridge.exe"]
+    R --> SM["Provisional sensor error model"]
+    SM --> B
     B --> F
     O --> B
     B --> R
@@ -52,6 +54,9 @@ steps, and radio packets belong outside this layer.
 | `sim_flight_sandbox.exe` | Fast repeatable estimator/controller fault tests | Simplified one-dimensional flight model |
 | `sim_electronics_sandbox.exe` | Review startup ARMABLE/BLOCKED policy | Does not emulate real I2C/SPI transactions |
 | `sim_actuator_sandbox.exe` | Review homing, rate, inhibit, and jam behavior | Not a TMC5240 driver or final mechanism model |
+| `sim_fault_replay_sandbox.exe` | Review timestamp/sensor fault policy and deterministic replay | Synthetic log; no real driver freshness data |
+| `sim_monte_carlo_sandbox.exe` | Fixed-seed software safety dispersion | Provisional 1-D distributions; not mission probability |
+| `ambar_core_tests.exe` | Focused assertions for public flight-core behavior | Does not exercise hardware drivers |
 | `ambar_controller_bridge.exe` | Preserve C++ controller state while RocketPy runs | Machine protocol only; not intended for direct use |
 
 `CMakeLists.txt` defines the same target graph for CMake users.
@@ -63,11 +68,13 @@ steps, and radio packets belong outside this layer.
 `sim/rocketpy/run_rocketpy_sim.py`. RocketPy owns atmosphere, motor mass change,
 aerodynamics, and trajectory integration. At each controller sample:
 
-1. RocketPy supplies trajectory-derived acceleration and altitude.
-2. The Python process sends a `STEP` message to `ambar_controller_bridge.exe`.
-3. The bridge calls the real C++ `AmbarFlightComputer` instance.
-4. The bridge returns estimate, phase, health, and deployment command.
-5. RocketPy rate-limits that command and applies it to its virtual airbrakes.
+1. RocketPy supplies trajectory truth and applies configured wind.
+2. The Python sensor adapter adds deterministic provisional bias, noise,
+   quantization, saturation, and latency.
+3. The Python process sends a `STEP` message to `ambar_controller_bridge.exe`.
+4. The bridge calls the real C++ `AmbarFlightComputer` instance.
+5. The bridge returns estimate, phase, health, and deployment command.
+6. RocketPy rate-limits that command and applies it to its virtual airbrakes.
 
 Vehicle inputs live in `sim/rocketpy/ambar_reference_config.json`; motor thrust
 lives in `sim/rocketpy/j420r.eng`. Detailed run data is written to
@@ -93,5 +100,7 @@ source of truth is the output of the executable suites.
 - Use `scripts/run_rocketpy_sim.ps1` for trajectory and apogee studies.
 - Use `scripts/run_simulation_ui.ps1` when reviewing results visually.
 - Use `src/main.cpp` when learning the `AmbarFlightComputer` API.
+- Use `ctest --test-dir build --output-on-failure` for the native automated
+  verification set after a CMake build.
 - Start future embedded integration with `include/ambar_airbrake.hpp`, then add
   board drivers and scheduling around it rather than modifying simulation code.

@@ -9,16 +9,14 @@ values that are still placeholders.
   Design Evaluation dated June 14, 2026.
 - `Project AMBAR M5 Report.docx`, an older June 11 full-report copy retained for
   requirement context and conflict checking.
-- Current V3 KiCad project:
-  `C:\Users\hoffm\OneDrive\Desktop\PCBs\Ethan PCV V3\NewAirbrakePCB\airbrake.kicad_sch`.
-- Earlier June 1 KiCad project candidate:
-  `C:\Users\hoffm\OneDrive\Desktop\PCBs\Airbreak PCB June 1\airbrake-PCB\airbrake.kicad_sch`.
-- Datasheets under `C:\Users\hoffm\OneDrive\Desktop\Data sheets`.
+- June 2 SharePoint KiCad project under `Electrical/pcb/`.
+- June 2 SharePoint OpenRocket file under
+  `Hardware/OpenRocket/Senior Design_3in_1.ork`.
+- Component datasheets supplied with the project files.
 
-The SharePoint URL required UCF sign-in in the automated browser, but the
-June 14 document was already present in Downloads and was extracted locally.
-See `docs/m5_report_data_extract.md` for the complete engineering-value map and
-confidence labels.
+The authenticated SharePoint library was inspected read-only. See
+`docs/m5_report_data_extract.md` for the engineering-value map and confidence
+labels.
 
 ## M5 Report Values Now Reflected in Code
 
@@ -58,7 +56,7 @@ These constants live in `include/ambar_project_requirements.hpp`.
 
 ## Hardware Facts Used by the Electronics Sandbox
 
-The current KiCad schematic candidate confirms these major parts:
+The June 2 SharePoint KiCad schematic confirms these major parts:
 
 - STM32H562RGT6 microcontroller
 - BMP388 barometer
@@ -86,6 +84,11 @@ The RocketPy reference model now uses:
 - RocketPy 1.12.1.
 - Certified public-domain AeroTech J420R RASP thrust data.
 - M5 3-inch vehicle diameter and 3000 ft target.
+- June 2 OpenRocket outer radius, nose length, total length, and stabilizing-fin
+  placement.
+- M5 constant wind of 3.58 m/s from 225 degrees.
+- Deterministic provisional accelerometer/barometer bias, noise, quantization,
+  and 20 ms latency before measurements reach the C++ bridge.
 - June 14 M5 OpenRocket passive apogee of 3379 ft as the current comparison
   point. The provisional RocketPy model is intentionally allowed to fail this
   comparison rather than being silently retuned.
@@ -95,7 +98,6 @@ The RocketPy reference model now uses:
 
 These are still not source-backed and should not be treated as real predictions:
 
-- Real OpenRocket `.ork` file or exported flight CSV.
 - Final measured flight-ready mass, center of gravity, and inertia.
 - Drag coefficient vs Mach/airbrake deployment.
 - Airbrake deployed area vs command fraction.
@@ -104,6 +106,10 @@ These are still not source-backed and should not be treated as real predictions:
 - Final actuator friction/load model.
 - Bench-measured 3V3 current draw.
 - Bench-measured I2C/SPI timing and signal integrity.
+
+The OpenRocket file is now available, but its cached motor simulations are
+marked `notsimulated` after later model changes. It must be rerun and exported
+before the cached trajectory values are treated as current evidence.
 
 The older June 11 report's 4005 ft result describes an earlier rocket design.
 It is no longer the current acceptance baseline, but it remains documented as a

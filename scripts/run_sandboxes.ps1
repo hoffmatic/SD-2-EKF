@@ -89,9 +89,15 @@ try {
         Build-Program $compiler "build\sim_flight_sandbox.exe" @("src\ambar_airbrake.cpp", "sim\flight_sandbox.cpp")
         Build-Program $compiler "build\sim_electronics_sandbox.exe" @("sim\electronics_sandbox.cpp")
         Build-Program $compiler "build\sim_actuator_sandbox.exe" @("sim\actuator_sandbox.cpp")
+        Build-Program $compiler "build\sim_fault_replay_sandbox.exe" @("src\ambar_airbrake.cpp", "sim\fault_replay_sandbox.cpp")
+        Build-Program $compiler "build\sim_monte_carlo_sandbox.exe" @("src\ambar_airbrake.cpp", "sim\monte_carlo_sandbox.cpp")
+        Build-Program $compiler "build\ambar_core_tests.exe" @("src\ambar_airbrake.cpp", "tests\ambar_core_tests.cpp")
     }
 
     Run-Program "build\rocket_airbrake_ekf.exe"
+    Run-Program "build\ambar_core_tests.exe"
+    Run-Program "build\sim_fault_replay_sandbox.exe"
+    Run-Program "build\sim_monte_carlo_sandbox.exe"
     Run-Program "build\sim_flight_sandbox.exe"
     Run-Program "build\sim_electronics_sandbox.exe"
     Run-Program "build\sim_actuator_sandbox.exe"

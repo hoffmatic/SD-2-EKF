@@ -21,7 +21,9 @@ http://127.0.0.1:8765
 
 ## Controls
 
-- `Run All` runs the flight, RocketPy physics, electronics, and actuator suites.
+- `Run All` runs core assertions, fault/replay, Monte Carlo, flight,
+  electronics, actuator, and RocketPy checks. The dashboard summarizes the four
+  main suites; the complete added-suite output remains available in Raw Output.
 - `Run Suite` runs only the currently selected suite.
 - `Rebuild` recompiles before running. Leave it off for faster repeat runs.
 - Select a scenario row to inspect its condition, pass rule, measurements, and
@@ -38,11 +40,13 @@ http://127.0.0.1:8765
 The Inputs view groups controls by their engineering role:
 
 - Mission: target apogee.
-- Launch: rail length, angle from vertical, and heading.
+- Launch: rail length, angle from vertical, heading, constant wind speed, and
+  wind-from direction.
 - Vehicle: dry mass, powered/coast drag coefficients, and stabilizing-fin geometry.
 - Airbrake: post-burn inhibit margin, deployment-rate limit, and full-deployment
   drag increment.
-- Sensors: controller and barometer rates plus simulated barometer noise.
+- Sensors: controller/barometer rates plus provisional accelerometer bias/noise,
+  barometer bias/noise, and latency.
 
 Every field has a bounded numeric range enforced by the local Python server.
 Values outside that range are rejected before RocketPy starts. A changed value

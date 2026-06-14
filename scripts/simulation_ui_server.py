@@ -74,6 +74,8 @@ INPUT_SPECS = [
     field_spec("railLengthFt", "Rail length", "Launch", "ft", 4, 30, 0.25, ("environment", "rail_length_m"), "M5 report", lambda value: value * FEET_TO_METERS, lambda value: value / FEET_TO_METERS),
     field_spec("launchAngleFromVerticalDeg", "Angle from vertical", "Launch", "deg", 0, 20, 0.5, ("environment", "inclination_deg"), "Launch setting", lambda value: 90.0 - value, lambda value: 90.0 - value),
     field_spec("headingDeg", "Heading", "Launch", "deg", 0, 360, 1, ("environment", "heading_deg"), "M5 report"),
+    field_spec("windSpeedMps", "Constant wind speed", "Launch", "m/s", 0, 30, 0.1, ("environment", "wind_speed_mps"), "M5 report"),
+    field_spec("windFromDirectionDeg", "Wind direction from", "Launch", "deg", 0, 360, 1, ("environment", "wind_from_direction_deg"), "M5 report"),
     field_spec("dryMassLb", "Dry mass", "Vehicle", "lb", 1, 50, 0.1, ("rocket", "dry_mass_kg"), "Placeholder", lambda value: value * POUNDS_TO_KG, lambda value: value / POUNDS_TO_KG),
     field_spec("powerOnDragCoefficient", "Power-on drag coefficient", "Vehicle", "Cd", 0.05, 2.5, 0.01, ("rocket", "power_on_drag_coefficient"), "Placeholder"),
     field_spec("powerOffDragCoefficient", "Power-off drag coefficient", "Vehicle", "Cd", 0.05, 2.5, 0.01, ("rocket", "power_off_drag_coefficient"), "Placeholder"),
@@ -86,7 +88,11 @@ INPUT_SPECS = [
     field_spec("fullDeploymentDragCoefficient", "Full-deployment drag increment", "Airbrake", "Cd", 0, 3, 0.01, ("airbrakes", "drag_coefficient_at_full_deployment"), "Placeholder"),
     field_spec("controllerRateHz", "Controller rate", "Sensors", "Hz", 10, 1000, 10, ("airbrakes", "sampling_rate_hz"), "Model setting"),
     field_spec("barometerRateHz", "Barometer rate", "Sensors", "Hz", 1, 200, 1, ("airbrakes", "barometer_rate_hz"), "Model setting"),
-    field_spec("barometerStdDevFt", "Barometer standard deviation", "Sensors", "ft", 0.01, 100, 0.1, ("airbrakes", "barometer_std_dev_m"), "Placeholder", lambda value: value * FEET_TO_METERS, lambda value: value / FEET_TO_METERS),
+    field_spec("accelerometerBiasMps2", "Accelerometer bias", "Sensors", "m/s^2", -10, 10, 0.05, ("sensor_model", "accelerometer_bias_mps2"), "Provisional"),
+    field_spec("accelerometerNoiseMps2", "Accelerometer noise standard deviation", "Sensors", "m/s^2", 0, 20, 0.05, ("sensor_model", "accelerometer_noise_std_dev_mps2"), "Provisional"),
+    field_spec("barometerBiasFt", "Barometer bias", "Sensors", "ft", -100, 100, 0.1, ("sensor_model", "barometer_bias_m"), "Provisional", lambda value: value * FEET_TO_METERS, lambda value: value / FEET_TO_METERS),
+    field_spec("barometerStdDevFt", "Barometer noise standard deviation", "Sensors", "ft", 0.01, 100, 0.1, ("sensor_model", "barometer_noise_std_dev_m"), "Provisional", lambda value: value * FEET_TO_METERS, lambda value: value / FEET_TO_METERS),
+    field_spec("sensorLatencyMs", "Sensor latency", "Sensors", "ms", 0, 500, 1, ("sensor_model", "latency_s"), "Provisional", lambda value: value / 1000.0, lambda value: value * 1000.0),
 ]
 
 SUITE_EXECUTABLES = {

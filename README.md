@@ -15,22 +15,27 @@ burnout, and live flight-state telemetry.
 - Flight phase tracking: pad idle, boost, coast, airbrake active, recovery, fault
 - Apogee prediction and bounded airbrake deployment command
 - Embedded-friendly interfaces with fixed-size arrays and no heap allocation
-- June 1 KiCad pin-map constants in `include/ambar_board_pins.hpp`
+- June 2 provisional KiCad pin-map constants in `include/ambar_board_pins.hpp`
 - Datasheet-derived device IDs, bus modes, addresses, and register constants in
   `include/ambar_device_constants.hpp`
 - Virtual sandboxes for flight behavior, electronics bring-up checks, and
   actuator motion/fault behavior
 - RocketPy 1.12.1 trajectory physics using the M5-selected J420R thrust curve
   and a persistent bridge to the real C++ estimator/controller
+- Deterministic timestamp/sensor fault injection, synthetic log replay, and a
+  200-trial fixed-seed Monte Carlo safety study
+- CTest regression tests and GitHub Actions verification
 
 ## Current Status
 
 This is an integration scaffold, not flight-ready software.
 
-The June 14 M5 report cross-check currently fails: RocketPy predicts 3955 ft
+The June 14 M5 report cross-check currently fails: RocketPy predicts 3851 ft
 passive apogee versus 3379 ft in the report and only 42.7 ft/s off the reported
-72-inch rail. This mismatch is intentionally visible until the current
-OpenRocket file, mass properties, and drag data are available.
+72-inch rail. The closed-loop result is 2979 ft, but that does not validate
+target accuracy while the passive and rail-exit checks fail. These mismatches
+remain visible until the OpenRocket configuration, mass properties, and drag
+data are reconciled.
 
 Before use in flight hardware, add:
 
@@ -39,7 +44,7 @@ Before use in flight hardware, add:
 - Final measured mass properties and drag curves for the RocketPy model
 - A drag-aware embedded apogee predictor calibrated from RocketPy/OpenRocket and flight logs
 - TMC5240 motor driver limits, current monitoring, and fail-safe behavior
-- Unit tests, simulation replay tests, and hardware-in-the-loop tests
+- Hardware-in-the-loop tests and recorded hardware-log replay
 - Telemetry packet definitions for estimate, phase, command, and health
 
 ## Build
@@ -79,6 +84,9 @@ cmake --build build
 .\build\Debug\sim_flight_sandbox.exe
 .\build\Debug\sim_electronics_sandbox.exe
 .\build\Debug\sim_actuator_sandbox.exe
+.\build\Debug\sim_fault_replay_sandbox.exe
+.\build\Debug\sim_monte_carlo_sandbox.exe
+.\build\Debug\ambar_core_tests.exe
 .\build\Debug\ambar_controller_bridge.exe
 ```
 
@@ -136,8 +144,10 @@ flow, file dependency map, and the intended use case for each executable.
 
 - [docs/project_requirements.md](docs/project_requirements.md): AMBAR M5
   requirements mapped to the estimator and controller.
-- [docs/hardware_map.md](docs/hardware_map.md): current June 1 V3 KiCad
-  component and STM32 pin map.
+- [docs/project_status.md](docs/project_status.md): implemented, simulated,
+  provisional, and future capabilities with the current verification snapshot.
+- [docs/hardware_map.md](docs/hardware_map.md): provisional June 2 V3 KiCad
+  component and STM32 pin map, including routing maturity.
 - [docs/datasheet_integration_notes.md](docs/datasheet_integration_notes.md):
   datasheet facts reflected in firmware constants.
 - [docs/simulation_sandboxes.md](docs/simulation_sandboxes.md): project review
@@ -158,6 +168,8 @@ flow, file dependency map, and the intended use case for each executable.
   flight core, simulations, scripts, and browser UI connect.
 - [docs/simulation_audit.md](docs/simulation_audit.md): engineering review of
   what each simulation proves, current gaps, and recommended next simulations.
+- [docs/m5_report_change_guide.md](docs/m5_report_change_guide.md):
+  section-by-section advice for manually correcting the Word report.
 
 Older V2 screenshot notes and outdated BOM mismatch notes were removed from the
 live repo so GitHub only presents the current working baseline.

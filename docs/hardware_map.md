@@ -1,13 +1,13 @@
 # Current Hardware Map
 
-Source files:
+Provisional source files reviewed from SharePoint:
 
-- `airbrake.kicad_sch`
-- `airbrake.kicad_pcb`
+- `Electrical/pcb/airbrake.kicad_sch`
+- `Electrical/pcb/airbrake.kicad_pcb`
 
-Latest parsed source folder:
+SharePoint upload time:
 
-- `C:\Users\hoffm\OneDrive\Desktop\PCBs\Ethan PCV V3\NewAirbrakePCB`
+- June 2, 2026 at approximately 6:09 AM Eastern
 
 KiCad schematic title block:
 
@@ -16,12 +16,14 @@ KiCad schematic title block:
 - Date: 2026-05-17
 - Company: Project AMBAR
 
-This document is generated from the current V3 KiCad project and is the
-authoritative hardware reference for firmware planning in this repo.
+This is the strongest available current hardware candidate and is the
+provisional reference for firmware pin planning. It is not a manufacturing
+release: the inspected PCB contains 109 footprints but zero routed copper
+segments, zero vias, and zero copper zones.
 
-June 1 PCB update: the main sensor, radio, flash, and motor-driver pin groups
-remain consistent with the earlier V3 extract. The LED GPIO assignment changed
-and is reflected below.
+The local OneDrive project previously named as authoritative differs from this
+SharePoint upload and must not be used as the source of the U10/LED pin map.
+The SharePoint schematic and PCB content support the assignments below.
 
 ## Major Parts In V3
 
@@ -171,6 +173,10 @@ Relevant TMC5240 nets:
 - MCU package shown in KiCad is STM32H562RGT6.
 - Radio remains SX1280, so the ground-station radio compatibility question is
   still open.
+- The board is six-layer but not single-sided: R9, R10, and U9 are placed on
+  the back side.
+- Routing, via placement, copper pours, ERC/DRC review, Gerbers, drill files,
+  assembly outputs, and release hashes are still required before fabrication.
 
 ## Firmware Work Unlocked By V3
 

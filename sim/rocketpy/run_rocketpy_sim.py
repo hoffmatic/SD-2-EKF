@@ -21,7 +21,9 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import random
 import subprocess
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -48,6 +50,36 @@ class BridgeState:
     predicted_apogee_m: float = 0.0
     healthy: bool = True
     phase: str = "PadIdle"
+
+
+class SensorModel:
+    """Deterministic provisional sensor errors applied before the C++ bridge."""
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        self.values = config["sensor_model"]
+        self.random = random.Random(self.values["random_seed"])
+
+    @staticmethod
+    def _quantize(value: float, resolution: float) -> float:
+        return round(value / resolution) * resolution if resolution > 0 else value
+
+    def acceleration(self, truth_mps2: float) -> float:
+        value = (
+            truth_mps2
+            + self.values["accelerometer_bias_mps2"]
+            + self.random.gauss(0.0, self.values["accelerometer_noise_std_dev_mps2"])
+        )
+        measurement_range = self.values["accelerometer_range_mps2"]
+        value = max(-measurement_range, min(measurement_range, value))
+        return self._quantize(value, self.values["accelerometer_resolution_mps2"])
+
+    def altitude(self, truth_m: float) -> float:
+        value = (
+            truth_m
+            + self.values["barometer_bias_m"]
+            + self.random.gauss(0.0, self.values["barometer_noise_std_dev_m"])
+        )
+        return self._quantize(value, self.values["barometer_resolution_m"])
 
 
 class ControllerBridge:
@@ -160,7 +192,18 @@ def build_environment(config: dict[str, Any]) -> Environment:
         longitude=values["longitude_deg"],
         elevation=values["elevation_m"],
     )
-    environment.set_atmospheric_model(type="standard_atmosphere")
+    # RocketPy's custom atmosphere preserves standard pressure/temperature when
+    # those fields are None while allowing the report-backed wind to be applied.
+    direction_rad = math.radians(values["wind_from_direction_deg"])
+    wind_u = -values["wind_speed_mps"] * math.sin(direction_rad)
+    wind_v = -values["wind_speed_mps"] * math.cos(direction_rad)
+    environment.set_atmospheric_model(
+        type="custom_atmosphere",
+        pressure=None,
+        temperature=None,
+        wind_u=wind_u,
+        wind_v=wind_v,
+    )
     return environment
 
 
@@ -214,7 +257,10 @@ def build_rocket(config: dict[str, Any], motor: SolidMotor) -> Rocket:
         span=values["fin_span_m"],
         position=values["fin_position_m"],
     )
-    rocket.set_rail_buttons(upper_button_position=1.2, lower_button_position=0.3)
+    rocket.set_rail_buttons(
+        upper_button_position=values["upper_rail_button_position_m"],
+        lower_button_position=values["lower_rail_button_position_m"],
+    )
     return rocket
 
 
@@ -257,6 +303,8 @@ def run_closed_loop(config: dict[str, Any], bridge_path: Path) -> tuple[Flight, 
     previous_velocity = 0.0
     next_barometer_time = 0.0
     actual_deployment = 0.0
+    sensor_model = SensorModel(config)
+    truth_history: deque[tuple[float, float, float]] = deque()
 
     def controller(
         time: float,
@@ -301,15 +349,25 @@ def run_closed_loop(config: dict[str, Any], bridge_path: Path) -> tuple[Flight, 
             dt_s = time - previous_time
             acceleration_mps2 = (velocity_mps - previous_velocity) / dt_s
 
+        truth_history.append((time, acceleration_mps2, altitude_m))
+        delayed_time = time - config["sensor_model"]["latency_s"]
+        while len(truth_history) > 1 and truth_history[1][0] <= delayed_time:
+            truth_history.popleft()
+        _, delayed_acceleration_mps2, delayed_altitude_m = truth_history[0]
+        measured_acceleration_mps2 = sensor_model.acceleration(
+            delayed_acceleration_mps2
+        )
+
         use_barometer = time + 1e-9 >= next_barometer_time
         if use_barometer:
             next_barometer_time += 1.0 / airbrake_config["barometer_rate_hz"]
+        measured_altitude_m = sensor_model.altitude(delayed_altitude_m)
 
         bridge_state = bridge.step(
             timestamp_s=time,
-            acceleration_mps2=acceleration_mps2,
-            altitude_m=altitude_m,
-            altitude_std_dev_m=airbrake_config["barometer_std_dev_m"],
+            acceleration_mps2=measured_acceleration_mps2,
+            altitude_m=measured_altitude_m,
+            altitude_std_dev_m=config["sensor_model"]["barometer_measurement_std_dev_m"],
             use_barometer=use_barometer,
         )
         desired_deployment = 0.0 if bridge_state.inhibit else bridge_state.deploy_fraction
@@ -326,7 +384,9 @@ def run_closed_loop(config: dict[str, Any], bridge_path: Path) -> tuple[Flight, 
                 "time_s": time,
                 "truth_altitude_m": altitude_m,
                 "truth_velocity_mps": velocity_mps,
-                "measured_acceleration_mps2": acceleration_mps2,
+                "truth_acceleration_mps2": acceleration_mps2,
+                "measured_acceleration_mps2": measured_acceleration_mps2,
+                "measured_altitude_m": measured_altitude_m,
                 "estimated_altitude_m": bridge_state.altitude_m,
                 "estimated_velocity_mps": bridge_state.velocity_mps,
                 "predicted_apogee_m": bridge_state.predicted_apogee_m,
@@ -415,13 +475,16 @@ def main() -> int:
     print(f"  target tolerance: +/-{config['requirements']['target_tolerance_ft']:.1f} ft")
     print(f"  rail length: {config['environment']['rail_length_m'] * METERS_TO_FEET:.2f} ft")
     print(f"  launch angle from vertical: {90.0 - config['environment']['inclination_deg']:.1f} deg")
+    print(f"  constant wind: {config['environment']['wind_speed_mps']:.2f} m/s from {config['environment']['wind_from_direction_deg']:.0f} deg")
     print(f"  dry mass: {config['rocket']['dry_mass_kg'] * 2.2046226218:.2f} lb")
     print(f"  power-on drag coefficient: {config['rocket']['power_on_drag_coefficient']:.3f}")
     print(f"  power-off drag coefficient: {config['rocket']['power_off_drag_coefficient']:.3f}")
     print(f"  full-deployment airbrake drag coefficient: {config['airbrakes']['drag_coefficient_at_full_deployment']:.3f}")
     print(f"  maximum deployment rate: {config['airbrakes']['maximum_rate_fraction_per_s'] * 100.0:.1f} percent/s")
     print(f"  barometer rate: {config['airbrakes']['barometer_rate_hz']:.1f} Hz")
-    print(f"  barometer standard deviation: {config['airbrakes']['barometer_std_dev_m'] * METERS_TO_FEET:.2f} ft")
+    print(f"  accelerometer bias/noise: {config['sensor_model']['accelerometer_bias_mps2']:.2f} / {config['sensor_model']['accelerometer_noise_std_dev_mps2']:.2f} m/s^2")
+    print(f"  barometer bias/noise: {config['sensor_model']['barometer_bias_m'] * METERS_TO_FEET:.2f} / {config['sensor_model']['barometer_noise_std_dev_m'] * METERS_TO_FEET:.2f} ft")
+    print(f"  sensor latency: {config['sensor_model']['latency_s'] * 1000.0:.0f} ms")
     print("PASS/FAIL meaning: PASS verifies software coupling and stated reference-model behavior; it does not validate unresolved mass or aerodynamic inputs.")
 
     passive = run_passive(config)
@@ -469,6 +532,20 @@ def main() -> int:
     )
     target_error_ft = closed_apogee_ft - target_ft
     apogee_reduction_ft = passive_apogee_ft - closed_apogee_ft
+    maximum_altitude_error_m = max(
+        (
+            abs(entry["estimated_altitude_m"] - entry["truth_altitude_m"])
+            for entry in controller_log
+        ),
+        default=0.0,
+    )
+    maximum_velocity_error_mps = max(
+        (
+            abs(entry["estimated_velocity_mps"] - entry["truth_velocity_mps"])
+            for entry in controller_log
+        ),
+        default=0.0,
+    )
 
     passive_pass = abs(passive_difference_percent) <= 10.0
     coupling_pass = (
@@ -478,6 +555,7 @@ def main() -> int:
         and deployment_after_burn
         and command_phases_valid
     )
+    target_pass = abs(target_error_ft) <= tolerance_ft
     maximum_mach = max(passive.max_mach_number, closed.max_mach_number)
     minimum_rail_exit_fps = min(
         passive.out_of_rail_velocity * MPS_TO_FPS,
@@ -536,15 +614,28 @@ def main() -> int:
             "command phases valid": "yes" if command_phases_valid else "no",
             "controller samples": str(len(controller_log)),
             "estimator healthy": "yes" if controller_healthy else "no",
+            "maximum altitude error": f"{maximum_altitude_error_m:.2f} m",
+            "maximum velocity error": f"{maximum_velocity_error_mps:.2f} m/s",
         },
-        (
-            "PASS - closed-loop apogee is inside the +/-100 ft M5 target band for this provisional model."
-            if abs(target_error_ft) <= tolerance_ft
-            else "WARN - closed-loop apogee is outside the +/-100 ft target band; calibrate final mass and drag data before tuning the controller."
-        ),
+        "This case proves bridge and safety behavior only. Target attainment is evaluated independently below.",
     )
     print_case(
         3,
+        "closed-loop target attainment",
+        "The closed-loop apogee from the provisional RocketPy model is compared directly with the 3000 +/-100 ft mission band.",
+        "PASS if closed-loop apogee is between 2900 ft and 3100 ft. This is necessary but not sufficient evidence because source-model checks must also pass.",
+        target_pass,
+        "The provisional closed-loop result is inside the target band." if target_pass else "The provisional closed-loop result is outside the target band.",
+        {
+            "closed-loop apogee": f"{closed_apogee_ft:.0f} ft",
+            "target": f"{target_ft:.0f} ft",
+            "tolerance": f"+/-{tolerance_ft:.0f} ft",
+            "target error": f"{target_error_ft:+.0f} ft",
+        },
+        "Do not claim validated target accuracy unless passive-model agreement, uncertainty studies, and hardware evidence also pass.",
+    )
+    print_case(
+        4,
         "M5 flight envelope checks",
         "The closed-loop RocketPy trajectory is checked against the M5 subsonic and minimum rail-exit requirements.",
         "PASS if maximum Mach is no greater than 1.0 and rail-exit velocity is at least 52 ft/s.",
@@ -570,6 +661,7 @@ def main() -> int:
                     "environment": config["environment"],
                     "rocket": config["rocket"],
                     "airbrakes": config["airbrakes"],
+                    "sensorModel": config["sensor_model"],
                     "requirements": config["requirements"],
                 },
                 "reportReference": {
@@ -599,6 +691,14 @@ def main() -> int:
                     "minimumDeploymentTimeS": minimum_deploy_time_s,
                     "deploymentAfterBurn": deployment_after_burn,
                     "commandPhasesValid": command_phases_valid,
+                    "maximumAltitudeErrorM": maximum_altitude_error_m,
+                    "maximumVelocityErrorMps": maximum_velocity_error_mps,
+                },
+                "acceptance": {
+                    "passiveReferencePass": bool(passive_pass),
+                    "couplingSafetyPass": bool(coupling_pass),
+                    "targetAttainmentPass": bool(target_pass),
+                    "flightEnvelopePass": bool(envelope_pass),
                 },
                 "controllerLog": controller_log,
                 "provenance": config["provenance"],
@@ -613,11 +713,12 @@ def main() -> int:
     print("-----------------------------------")
     print(f"M5 passive reference         {'PASS' if passive_pass else 'FAIL'}")
     print(f"C++ closed-loop airbrakes    {'PASS' if coupling_pass else 'FAIL'}")
+    print(f"Closed-loop target           {'PASS' if target_pass else 'FAIL'}")
     print(f"M5 flight envelope checks    {'PASS' if envelope_pass else 'FAIL'}")
     # Keep terminal output portable and independent of the user's checkout path.
     print("\nMachine-readable results: build/rocketpy-last-run.json")
     print("Next model inputs needed: measured flight-ready mass/CG/inertia, final OpenRocket .ork export, and airbrake drag coefficient vs Mach/deployment.")
-    return 0 if passive_pass and coupling_pass and envelope_pass else 1
+    return 0 if passive_pass and coupling_pass and target_pass and envelope_pass else 1
 
 
 if __name__ == "__main__":

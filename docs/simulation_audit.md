@@ -9,7 +9,7 @@ a flight-validated digital twin. The current suites are strongest at checking
 deterministic software reactions and weakest at representing sensor, electrical,
 mechanical, aerodynamic, and manufacturing uncertainty.
 
-Two audit defects were corrected:
+The initial audit defects were corrected, and this update adds:
 
 1. The native flight, electronics, and actuator sandboxes now return a nonzero
    process exit code when any printed scenario fails. Terminal scripts and
@@ -17,6 +17,11 @@ Two audit defects were corrected:
 2. RocketPy previously commanded airbrakes at 1.53 s even though the J420R
    thrust curve ends at 1.64 s. The bridge now uses the motor burn time plus a
    0.10 s margin, and the pass rule checks command time and flight phase.
+3. Formal CTest assertions for estimator timing, invalid values, innovation
+   gating, controller interlocks, fault latching, and the ballistic predictor.
+4. Dedicated fault/replay and fixed-seed Monte Carlo sandboxes.
+5. Report-backed constant wind plus deterministic sensor bias, noise,
+   quantization, saturation, and latency in the RocketPy bridge.
 
 The June 14 M5 report was subsequently extracted. It reports 3379 ft passive
 apogee for the current OpenRocket design, while the older full-report copy used
@@ -28,31 +33,32 @@ remaining calibrated to the superseded design.
 
 | Suite | Why It Exists | What It Currently Proves | What It Does Not Prove |
 | --- | --- | --- | --- |
-| Flight sandbox | Fast repeatable estimator/controller regression | Noise, fixed bias, one barometer spike, actuator lag, weak-motor inhibition | Real aerodynamics, body-axis conversion, sensor timing, hardware drivers, target accuracy |
+| Flight sandbox | Fast repeatable estimator/controller regression | Noise, fixed bias, one barometer spike, actuator lag, weak-motor inhibition | Real aerodynamics, body-axis conversion, hardware drivers, target accuracy |
 | Electronics sandbox | Review intended boot and arming policy before drivers exist | Static IDs, addresses, bus modes, pin uniqueness, and selected fault decisions | Actual bus transactions, power transients, RF link budget, flash throughput, thermal behavior |
 | Actuator sandbox | Exercise the `AirbrakeCommand` consumer contract | Homing gate, rate limit, retract behavior, simple jam/current fault | Motor torque, lead-screw load, backlash, friction, thermal limits, real stall-detection delay |
-| RocketPy sandbox | Couple six-degree-of-freedom trajectory physics to the real C++ controller | Persistent bridge, post-burn command gating, bounded deployment, trajectory response, reference envelope | Independent apogee accuracy, measured sensor behavior, uncertainty distribution, descent/recovery behavior |
+| Fault/replay sandbox | Make failure policy and replay reproducibility explicit | Duplicate timestamps, NaN containment, barometer dropout propagation, deterministic synthetic-log replay | Driver freshness checks, raw hardware logs, scheduler faults |
+| Monte Carlo sandbox | Regress safety behavior across deterministic dispersion | 200 fixed-seed trials with varied provisional thrust, drag, sensors, and actuator rate | Source-backed probability of mission success or 6-DOF uncertainty |
+| RocketPy sandbox | Couple six-degree-of-freedom trajectory physics to the real C++ controller | Wind, provisional sensor errors, persistent bridge, post-burn command gating, bounded deployment, trajectory response, reference envelope | Independent apogee accuracy, measured sensor behavior, source-backed uncertainty distribution, descent/recovery behavior |
 | Browser console | Make suite output reviewable by the team | Launches the same scripts and exposes conditions, rules, and results | Independent verification; it parses text emitted by the simulations |
 
 ## Open Findings
 
 ### High Priority
 
-- RocketPy feeds truth-derived vertical acceleration and altitude. The recorded
-  maximum estimator errors are about 0.0023 m/s and 0.0012 m, which is far more
-  accurate than real sensors. No noise, bias, quantization, latency, dropout,
-  saturation, axis rotation, or gravity-compensation error is applied.
-- The passive RocketPy model was calibrated to an older 4005 ft design using
-  placeholder mass, inertia, center of mass, and drag. The June 14 report gives
-  3379 ft for the current design. Until the current `.ork` file and mass
-  properties are available, disagreement is expected and should remain a
-  visible failed reference check.
+- RocketPy now applies provisional deterministic bias, noise, quantization,
+  saturation, and 20 ms latency. These are model assumptions, not measured
+  sensor performance. Axis rotation and gravity-compensation error remain
+  outside the model.
+- The June 2 OpenRocket body/nose/fin geometry is now reflected in RocketPy.
+  Placeholder mass, inertia, center of mass, and drag still prevent agreement
+  with the 3379 ft reported reference, so the mismatch remains a failed check.
 - The current report supplies updated launch conditions and stabilizing-fin
   geometry, but it does not supply mass, CG, inertia, axial component positions,
   or a reusable drag curve. Those missing values prevent independent
   reconstruction of the OpenRocket result.
-- No Monte Carlo or parameter-dispersion run exists. One nominal result cannot
-  estimate the probability of meeting the 3000 +/-100 ft requirement.
+- The native fixed-seed Monte Carlo now checks deterministic safety invariants.
+  Its 15/200 target-hit count is informational because the 1-D model and input
+  distributions are provisional; it is not a mission-success probability.
 - The embedded apogee predictor is ballistic. In the current RocketPy run its
   prediction is more than 600 m above eventual apogee near the end of boost,
   then becomes accurate later in coast. Controller success currently depends on
@@ -64,8 +70,9 @@ remaining calibrated to the superseded design.
   post-apogee retraction, descent, parachute interaction, or impact conditions.
 - The flight phase tracker can declare liftoff from a single acceleration sample.
   Pad vibration and isolated sensor spikes are not tested for false launch.
-- IMU timestamp gaps, frozen sensors, NaN/Inf samples, barometer dropout, stale
-  data, and sensor-rate jitter are not covered as complete scenarios.
+- Duplicate timestamps, NaN IMU input, and a barometer dropout window are now
+  covered. Frozen/stale detection, long gaps, backward time, saturation policy,
+  and sensor-rate jitter still require complete scenarios and scheduler APIs.
 - Electronics checks operate on direct scenario fields rather than fake I2C/SPI
   transactions. They cannot test future driver state machines or timeouts.
 - Flash capacity assumes a 64-byte record and only 10 Hz. The actual log packet
@@ -93,7 +100,7 @@ These primarily test software policy and do not require final hardware numbers:
    irregular sample cadence, and scheduler overrun.
 4. Sensor-fault tests: frozen IMU, frozen barometer, dropout windows, NaN/Inf,
    saturation, and recovery after transient faults.
-5. Post-apogee test: Recovery transition and commanded/physical retraction.
+5. Post-apogee test: commanded/physical retraction through Recovery.
 6. Bridge protocol stress: malformed lines, process termination, and thousands
    of persistent updates without state reset.
 7. Output-contract tests: parse each suite's JSON/text and verify UI status is
@@ -114,8 +121,8 @@ These primarily test software policy and do not require final hardware numbers:
    page buffering, erase strategy, and power-loss behavior.
 7. RF and telemetry model using antenna gain, orientation, packet rate, link
    budget, interference, and ground-station receiver details.
-8. Flight-log replay and hardware-in-the-loop testing once real sensor captures
-   and the first PCB are available.
+8. Replace the synthetic replay with captured hardware logs and add
+   hardware-in-the-loop testing once the first assembled PCB is available.
 
 ## Current Interpretation
 
@@ -126,9 +133,9 @@ next large increase in confidence will come from measured configuration data,
 Monte Carlo dispersion, and sensor/actuator hardware-in-the-loop tests.
 
 With the June 14 report inputs applied, the current RocketPy cross-check is
-openly failing: 3955 ft simulated passive apogee versus 3379 ft reported, and
+openly failing: 3851 ft simulated passive apogee versus 3379 ft reported, and
 42.7 ft/s simulated rail exit versus the 52 ft/s requirement and 75.5 ft/s
-reported result. The controller produces 3016 ft inside that provisional model,
+reported result. The controller produces 2979 ft inside that provisional model,
 but this cannot be used as target-accuracy evidence until the passive vehicle
 model is reconciled.
 

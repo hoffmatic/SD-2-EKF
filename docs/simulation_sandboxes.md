@@ -1,7 +1,8 @@
 # Simulation Sandboxes
 
-This repo now includes four desktop sandboxes that exercise the current AMBAR
-software and hardware assumptions without needing the real PCB.
+This repo includes native desktop sandboxes, C++ unit tests, and a RocketPy
+reference model that exercise current AMBAR software and hardware assumptions
+without needing the real PCB.
 
 These are not final flight predictions. They are virtual workbenches for asking:
 
@@ -48,6 +49,8 @@ Current gaps:
 - The M5 2.4 GHz requirement matches the SX1280 hardware.
 - The airbrake PCB uses a magnetometer; independent recovery GPS remains a
   separate vehicle-level requirement.
+- The June 2 PCB is a provisional placed-but-unrouted baseline, not a
+  manufacturing release.
 
 ## Build All Sandboxes
 
@@ -83,10 +86,12 @@ The first run installs pinned Python dependencies into the ignored local
 
 What it does:
 
-- Uses RocketPy for standard atmosphere, J420R thrust, variable motor mass,
+- Uses RocketPy for standard pressure/temperature, report-backed constant wind,
+  J420R thrust, variable motor mass,
   aerodynamic drag, rail departure, and 6-DOF trajectory integration.
-- Feeds trajectory-derived vertical IMU and barometer measurements into the
-  real C++ `AmbarFlightComputer` through `ambar_controller_bridge`.
+- Applies deterministic provisional sensor bias, noise, quantization,
+  saturation, and latency before feeding measurements into the real C++
+  `AmbarFlightComputer` through `ambar_controller_bridge`.
 - Applies the C++ deployment command to rate-limited RocketPy airbrakes.
 - Verifies that deployment starts only after the J420R burn time plus the
   configured post-burn margin and only while the controller reports
@@ -96,14 +101,54 @@ What it does:
 - Writes machine-readable controller and trajectory data to
   `build/rocketpy-last-run.json`.
 
-The current model is calibrated to the report's 4005 ft passive OpenRocket
-result with provisional dry mass and drag. This checks integration and behavior,
-not independent aerodynamic accuracy.
+The current model uses June 2 OpenRocket geometry but retains provisional dry
+mass, inertia, center of mass, and drag. It predicts 3851 ft passive versus the
+3379 ft report value and 42.7 ft/s rail exit versus the 52 ft/s minimum, so both
+checks fail visibly. Closed-loop apogee is 2979 ft, but that is not independent
+accuracy evidence while the source-model checks fail.
 
-The June 14 audit found that the earlier model first commanded deployment at
-1.53 s, before the 1.64 s thrust-curve endpoint. The bridge now configures a
-1.74 s minimum boost interval and the suite explicitly checks this ordering.
-The corrected provisional result is 3084 ft, or +84 ft from target.
+The bridge configures a 1.74 s minimum boost interval and checks that deployment
+does not begin before that time. The current first command occurs at 1.82 s.
+
+## Fault and Replay Sandbox
+
+Executable:
+
+```powershell
+.\build\sim_fault_replay_sandbox.exe
+```
+
+It verifies duplicate-timestamp rejection, NaN containment, inertial
+propagation during a barometer dropout, fault latching, and deterministic replay
+of `sim/replay/nominal_vertical_log.csv`. The replay file is synthetic and is
+only a regression fixture.
+
+## Fixed-Seed Monte Carlo Sandbox
+
+Executable:
+
+```powershell
+.\build\sim_monte_carlo_sandbox.exe
+```
+
+It runs 200 deterministic 1-D trials while varying provisional boost, burn,
+drag, sensor, and actuator parameters. All 200 current trials preserve health,
+command bounds, post-burn gating, and descending inhibition. Only 15/200 fall
+inside 3000 +/-100 ft; this is an explicit calibration warning, not a
+source-backed probability estimate.
+
+## Core Unit Tests
+
+Executable:
+
+```powershell
+.\build\ambar_core_tests.exe
+```
+
+The assertions cover timestamp recovery, invalid-value rejection, barometer
+gating, controller interlocks, fault latching/reset, and the current ballistic
+predictor contract. CMake also exposes these and the native sandboxes through
+`ctest --test-dir build --output-on-failure`.
 
 ## Flight Sandbox
 
@@ -197,9 +242,11 @@ Useful questions:
 2. Import the final OpenRocket `.ork` and drag-vs-Mach curves for cross-validation.
 3. Add plots of altitude, velocity, predicted apogee, and command to the UI.
 4. Add real sensor-driver unit tests once BMP388 and LSM6DSV32X drivers exist.
-5. Add hardware-in-the-loop tests that compare these virtual checks with actual
+5. Replace the synthetic replay with captured hardware logs.
+6. Add hardware-in-the-loop tests that compare these virtual checks with actual
    boot telemetry from the PCB.
-6. Verify the separate recovery GPS hardware and ground station outside this repo.
+7. Verify the separate recovery GPS hardware and SX1280-compatible ground
+   station outside this repo.
 
 See [simulation_audit.md](simulation_audit.md) for the prioritized coverage map
 and the project data needed to make each proposed simulation meaningful.
