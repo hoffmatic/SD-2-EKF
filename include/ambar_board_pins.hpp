@@ -1,5 +1,10 @@
 #pragma once
 
+// Architecture role: hardware-to-firmware naming boundary for the V3 PCB.
+// Desktop code uses these constants for compile-time and electronics-sandbox
+// checks. A future STM32 board-support package should translate them into HAL
+// or LL GPIO configuration without placing MCU details in the flight logic.
+
 #include <cstdint>
 
 namespace ambar::board {

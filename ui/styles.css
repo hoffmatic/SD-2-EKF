@@ -1,3 +1,9 @@
+/*
+ * Architecture role: presentation-only rules for ui/index.html and app.js.
+ * Simulation state and pass/fail logic must stay in the executable reports and
+ * parser, not in CSS classes or visual color choices.
+ */
+
 :root {
   --white: #ffffff;
   --canvas: #f5f7fa;

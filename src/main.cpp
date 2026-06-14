@@ -2,6 +2,11 @@
 #include "ambar_board_pins.hpp"
 #include "ambar_device_constants.hpp"
 
+// Architecture role: small desktop smoke test and usage example. It connects
+// synthetic sensor samples to AmbarFlightComputer and prints one final state.
+// This is not the embedded firmware entry point and is not the high-fidelity
+// trajectory model; use sim/rocketpy/run_rocketpy_sim.py for that use case.
+
 #include <algorithm>
 #include <cmath>
 #include <iostream>

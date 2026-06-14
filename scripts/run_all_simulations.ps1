@@ -2,6 +2,12 @@ param(
     [switch]$SkipBuild
 )
 
+<#
+Architecture role: top-level command-line test orchestrator.
+It runs the fast native suites first, then the RocketPy closed-loop suite. The
+browser UI's Run All action reaches the same path through simulation_ui_server.py.
+#>
+
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Resolve-Path (Join-Path $scriptDir "..")

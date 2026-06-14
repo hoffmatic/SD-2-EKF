@@ -115,6 +115,17 @@ flightComputer.updateBarometer(barometerAltitudeAgl_m, barometerStdDev_m);
 The actuator should consume only `AirbrakeCommand`. If `inhibit` is true, command
 the safe/retracted state.
 
+## Software Architecture
+
+The repository has one shared C++ flight-logic core and several adapters around
+it. Desktop simulations, RocketPy, and future STM32 firmware are intended to use
+the same `AmbarFlightComputer` API rather than duplicate estimator or controller
+logic. The browser UI launches those programs and displays their reports; it
+does not simulate the rocket itself.
+
+See [docs/software_architecture.md](docs/software_architecture.md) for the data
+flow, file dependency map, and the intended use case for each executable.
+
 ## Current Project Files
 
 - [docs/project_requirements.md](docs/project_requirements.md): AMBAR M5
@@ -134,6 +145,8 @@ the safe/retracted state.
   placeholders.
 - [docs/sensor_architecture.md](docs/sensor_architecture.md): verified separation
   between the airbrake magnetometer and independent recovery GPS.
+- [docs/software_architecture.md](docs/software_architecture.md): how the shared
+  flight core, simulations, scripts, and browser UI connect.
 
 Older V2 screenshot notes and outdated BOM mismatch notes were removed from the
 live repo so GitHub only presents the current working baseline.

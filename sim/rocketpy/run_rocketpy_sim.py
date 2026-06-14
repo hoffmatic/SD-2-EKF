@@ -4,6 +4,16 @@ RocketPy owns the motor, changing mass, atmosphere, aerodynamics, and 6-DOF
 trajectory. A persistent line-oriented bridge feeds virtual vertical IMU and
 barometer measurements into the same C++ estimator/controller used by the
 desktop sandboxes. The returned deployment command drives RocketPy airbrakes.
+
+Architecture connections:
+- ambar_reference_config.json supplies the versioned vehicle/model inputs.
+- j420r.eng supplies the motor thrust curve.
+- sim/controller_bridge.cpp exposes the shared C++ flight logic as a process.
+- scripts/run_rocketpy_sim.ps1 builds the bridge and launches this module.
+- build/rocketpy-last-run.json is the detailed machine-readable output.
+
+Use this file for trajectory/controller coupling and apogee studies. Use the
+smaller C++ sandboxes for quick logic and fault-regression checks.
 """
 
 from __future__ import annotations
@@ -40,6 +50,8 @@ class BridgeState:
 
 
 class ControllerBridge:
+    """Own the persistent C++ child process and its line protocol."""
+
     def __init__(self, executable: Path) -> None:
         self.process = subprocess.Popen(
             [str(executable)],
@@ -107,6 +119,7 @@ def load_config() -> dict[str, Any]:
 
 
 def build_environment(config: dict[str, Any]) -> Environment:
+    """Create the atmosphere and launch-site model used by every flight case."""
     values = config["environment"]
     environment = Environment(
         latitude=values["latitude_deg"],
@@ -118,6 +131,7 @@ def build_environment(config: dict[str, Any]) -> Environment:
 
 
 def build_motor(config: dict[str, Any]) -> SolidMotor:
+    """Build the selected motor from the versioned thrust curve and geometry."""
     values = config["motor"]
     # Grain geometry is a documented reference approximation. The imported
     # certified thrust curve and total propellant mass control flight impulse.
@@ -142,6 +156,7 @@ def build_motor(config: dict[str, Any]) -> SolidMotor:
 
 
 def build_rocket(config: dict[str, Any], motor: SolidMotor) -> Rocket:
+    """Assemble the passive rocket model before optional airbrakes are added."""
     values = config["rocket"]
     rocket = Rocket(
         radius=values["radius_m"],
@@ -170,6 +185,7 @@ def build_rocket(config: dict[str, Any], motor: SolidMotor) -> Rocket:
 
 
 def run_passive(config: dict[str, Any]) -> Flight:
+    """Generate the no-airbrake reference trajectory used for comparison."""
     environment = build_environment(config)
     rocket = build_rocket(config, build_motor(config))
     values = config["environment"]
@@ -187,6 +203,7 @@ def run_passive(config: dict[str, Any]) -> Flight:
 
 
 def run_closed_loop(config: dict[str, Any], bridge_path: Path) -> tuple[Flight, list[dict[str, Any]]]:
+    """Run RocketPy while the persistent C++ controller commands airbrakes."""
     environment = build_environment(config)
     rocket = build_rocket(config, build_motor(config))
     airbrake_config = config["airbrakes"]
@@ -453,7 +470,8 @@ def main() -> int:
     print(f"M5 passive reference         {'PASS' if passive_pass else 'FAIL'}")
     print(f"C++ closed-loop airbrakes    {'PASS' if coupling_pass else 'FAIL'}")
     print(f"M5 flight envelope checks    {'PASS' if envelope_pass else 'FAIL'}")
-    print(f"\nMachine-readable results: {RESULT_PATH}")
+    # Keep terminal output portable and independent of the user's checkout path.
+    print("\nMachine-readable results: build/rocketpy-last-run.json")
     print("Next model inputs needed: measured flight-ready mass/CG/inertia, final OpenRocket .ork export, and airbrake drag coefficient vs Mach/deployment.")
     return 0 if passive_pass and coupling_pass and envelope_pass else 1
 

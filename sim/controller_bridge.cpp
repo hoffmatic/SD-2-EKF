@@ -1,5 +1,10 @@
 #include "ambar_airbrake.hpp"
 
+// Architecture role: process boundary between Python trajectory physics and
+// the real C++ flight logic. run_rocketpy_sim.py keeps this executable alive,
+// sends RESET/STEP/QUIT messages, and receives STATE replies. Persistence is
+// essential because the EKF and phase tracker must retain state between steps.
+
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -7,6 +12,8 @@
 
 namespace {
 
+// Keep bridge output machine-readable and limited to values RocketPy needs.
+// Human-readable test reporting remains in run_rocketpy_sim.py.
 void writeOutput(const ambar::AmbarFlightComputerOutput& output) {
     std::cout << std::fixed << std::setprecision(6)
               << "STATE "

@@ -1,3 +1,8 @@
+// Architecture role: browser-side presentation and report parser.
+// The UI requests runs from scripts/simulation_ui_server.py, parses the stable
+// TEST CASE/SUMMARY text emitted by each suite, and renders it. No estimator,
+// controller, electronics, actuator, or RocketPy behavior is implemented here.
+
 const SUITE_META = {
   flight: { label: "Flight Control Suite", symbol: "↟" },
   rocketpy: { label: "RocketPy Physics Suite", symbol: "◉" },
@@ -356,6 +361,9 @@ async function hydrateLastRun() {
 }
 
 function parseSimulationOutput(raw, requestedSuite) {
+  // Run All concatenates several executable reports. Split them at the printed
+  // suite banners, then feed each section to the same per-case parser used for
+  // an individual Run Suite request.
   const data = structuredClone(baselineData);
   data.raw = raw;
   const suiteChunks = requestedSuite === "all"

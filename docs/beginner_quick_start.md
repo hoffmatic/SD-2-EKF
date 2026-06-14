@@ -106,7 +106,7 @@ M5 report still requires a separate GPS device in the rocket recovery system.
 
 If the script says it cannot find a C++ compiler, that means the computer does
 not yet have the tool needed to build the code. Send the exact error text to the
-team or to Codex. The code is still there; the computer just needs the build tool
+team maintainer. The code is still there; the computer just needs the build tool
 installed or configured.
 
 If a sandbox prints a failure in its table, read the `notes` or `reason` column.

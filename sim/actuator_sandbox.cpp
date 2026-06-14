@@ -1,6 +1,10 @@
 #include "ambar_airbrake.hpp"
 #include "ambar_project_requirements.hpp"
 
+// Architecture role: behavioral model of the mechanism that will consume
+// AirbrakeCommand. It tests homing, travel rate, inhibit, current, and jam
+// responses without pretending to be the final TMC5240 device driver.
+
 #include <algorithm>
 #include <cmath>
 #include <iomanip>

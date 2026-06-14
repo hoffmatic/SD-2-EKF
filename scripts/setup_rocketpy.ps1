@@ -1,16 +1,18 @@
 param()
 
+<#
+Architecture role: one-time local dependency setup for the physics simulation.
+Only RocketPy and its pinned Python dependencies belong in .venv; the C++ core
+and the standard-library UI server do not depend on this environment.
+#>
+
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Resolve-Path (Join-Path $scriptDir "..")
 $venvPython = Join-Path $repoRoot ".venv\Scripts\python.exe"
-$bundledPython = Join-Path $env:USERPROFILE ".cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
 
 if (-not (Test-Path $venvPython)) {
-    if (Test-Path $bundledPython) {
-        $basePython = $bundledPython
-        $baseArguments = @()
-    } elseif (Get-Command python -ErrorAction SilentlyContinue) {
+    if (Get-Command python -ErrorAction SilentlyContinue) {
         $basePython = (Get-Command python).Source
         $baseArguments = @()
     } elseif (Get-Command py -ErrorAction SilentlyContinue) {

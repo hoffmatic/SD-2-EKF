@@ -1,8 +1,14 @@
-"""Local server for the AMBAR simulation console.
+"""Local server and process dispatcher for the AMBAR simulation console.
 
 The server intentionally uses only Python's standard library so team members do
 not need npm or a Python package install. It serves the static UI and exposes one
-local-only API that runs the existing sandbox executables or build script.
+local-only API that runs the existing sandbox executables or build scripts.
+
+Architecture connections:
+- ui/index.html, ui/styles.css, and ui/app.js are the browser client.
+- /api/run maps UI requests to the PowerShell scripts or native executables.
+- /api/last-run restores the latest report after a browser refresh.
+- The server never implements flight logic; it only launches and reports it.
 """
 
 from __future__ import annotations
@@ -33,6 +39,7 @@ SUITE_EXECUTABLES = {
 
 
 def command_for_run(suite: str, rebuild: bool) -> list[str]:
+    """Map a UI suite name to the same commands used from a terminal."""
     if suite == "all":
         command = [
             "powershell",
@@ -89,6 +96,7 @@ def command_for_run(suite: str, rebuild: bool) -> list[str]:
 
 
 class SimulationHandler(SimpleHTTPRequestHandler):
+    """Serve static assets and the two local JSON API endpoints."""
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(UI_ROOT), **kwargs)
 
@@ -106,7 +114,8 @@ class SimulationHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/api/health":
-            self.send_json({"ok": True, "repo": str(REPO_ROOT)})
+            # Expose only a stable project identifier, not a user's local path.
+            self.send_json({"ok": True, "project": "SD-2-EKF"})
             return
         if self.path == "/api/last-run":
             if LAST_RUN_PATH.exists():

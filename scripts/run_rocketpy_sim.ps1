@@ -2,6 +2,13 @@ param(
     [switch]$SkipBuild
 )
 
+<#
+Architecture role: RocketPy adapter launcher.
+It ensures the Python environment exists, builds sim/controller_bridge.cpp, and
+passes that executable to sim/rocketpy/run_rocketpy_sim.py. The Python model and
+C++ controller therefore remain separate while running in one closed loop.
+#>
+
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Resolve-Path (Join-Path $scriptDir "..")

@@ -1,5 +1,10 @@
 #include "ambar_airbrake.hpp"
 
+// Architecture role: implementation of the reusable estimator, phase tracker,
+// and deployment controller declared in include/ambar_airbrake.hpp. Keep this
+// translation unit free of desktop, RocketPy, UI, and STM32 dependencies so the
+// same control behavior can be compiled for simulations and eventual firmware.
+
 #include <algorithm>
 #include <cmath>
 

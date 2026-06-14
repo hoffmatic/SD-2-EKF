@@ -13,8 +13,9 @@ values that are still placeholders.
 - Datasheets under `C:\Users\hoffm\OneDrive\Desktop\Data sheets`.
 
 The online SharePoint folder still requires UCF sign-in before it can be read
-directly from Codex. The local sync currently exposed only an older `V1` EKF file
-under `C:\Users\hoffm\OneDrive\Documents\GitHub\Project AMBAR`.
+from an unauthenticated local checkout. The local sync currently exposed only
+an older `V1` EKF file under
+`C:\Users\hoffm\OneDrive\Documents\GitHub\Project AMBAR`.
 
 ## M5 Report Values Now Reflected in Code
 

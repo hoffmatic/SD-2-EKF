@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
 
+# Architecture role: describes the native C++ dependency graph. ambar_core is
+# the shared flight-logic library; every executable below is a desktop adapter,
+# demo, simulation suite, or process bridge around that library.
+
 # Desktop build target for the AMBAR estimator/controller scaffold. The same
 # source files are intended to stay portable when the STM32 project is added.
 project(rocket_airbrake_ekf

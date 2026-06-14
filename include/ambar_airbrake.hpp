@@ -1,5 +1,11 @@
 #pragma once
 
+// Architecture role: public, platform-independent flight-logic interface.
+// src/ambar_airbrake.cpp implements these types. The desktop demo, flight
+// sandbox, and RocketPy controller bridge all call this same API so simulation
+// does not maintain a second copy of the estimator or airbrake controller.
+// Future STM32 sensor tasks should also enter through AmbarFlightComputer.
+
 #include <array>
 #include <cstdint>
 

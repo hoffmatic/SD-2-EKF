@@ -1,5 +1,9 @@
 #pragma once
 
+// Architecture role: mission requirements expressed as reusable constants.
+// Simulation suites compare behavior against these values, keeping report
+// limits out of individual tests and away from hardware-specific pin data.
+
 #include "ambar_airbrake.hpp"
 
 namespace ambar::requirements {

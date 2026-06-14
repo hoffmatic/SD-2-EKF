@@ -1,5 +1,10 @@
 #pragma once
 
+// Architecture role: datasheet-backed identities and electrical/protocol
+// limits shared by bring-up code and simulations. This file contains facts,
+// not device drivers. Future drivers should use these values when probing the
+// hardware; sim/electronics_sandbox.cpp checks the same expectations virtually.
+
 #include <cstddef>
 #include <cstdint>
 

@@ -1,5 +1,9 @@
 #include "ambar_airbrake.hpp"
 
+// Architecture role: fast deterministic regression suite for the shared C++
+// estimator/controller. It injects sensor noise and faults directly, making it
+// useful for software behavior checks without the cost of RocketPy physics.
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>

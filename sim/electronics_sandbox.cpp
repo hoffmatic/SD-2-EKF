@@ -2,6 +2,11 @@
 #include "ambar_device_constants.hpp"
 #include "ambar_project_requirements.hpp"
 
+// Architecture role: virtual preflight/bring-up policy for the V3 electronics.
+// It consumes pin, device, and requirement constants but does not emulate bus
+// timing or run production drivers. Use it to review ARMABLE/BLOCKED decisions
+// before hardware-in-the-loop tests exist.
+
 #include <cstdint>
 #include <iomanip>
 #include <iostream>

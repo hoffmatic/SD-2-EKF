@@ -2,6 +2,13 @@ param(
     [switch]$SkipBuild
 )
 
+<#
+Architecture role: build and run the fast native desktop targets.
+This script compiles the shared flight logic with its demo and flight sandbox,
+then compiles the independent electronics and actuator models. The UI server
+also calls this script when a native suite needs rebuilding.
+#>
+
 $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
