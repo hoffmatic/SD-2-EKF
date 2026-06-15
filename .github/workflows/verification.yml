@@ -52,6 +52,10 @@ jobs:
           echo "RocketPy completed with one or more failed engineering criteria."
           echo "Review the uploaded result artifact; known model gaps are not hidden or force-fitted."
 
+      - name: Validate structured RocketPy flight data
+        if: always()
+        run: python scripts/validate_rocketpy_output.py build/rocketpy-last-run.json
+
       - name: Upload RocketPy results
         if: always()
         uses: actions/upload-artifact@v4

@@ -129,7 +129,7 @@ provisional RocketPy model reports:
 - Rail exit: 42.7 ft/s versus the 52 ft/s requirement and 75.5 ft/s report
   result.
 - Maximum Mach: 0.494 versus 0.509 in the report.
-- Closed-loop apogee: 2979 ft, but this is not a validated target result because
+- Closed-loop apogee: 2973 ft, but this is not a validated target result because
   the passive vehicle model fails its source comparison.
 
 The passive-reference and rail-exit tests therefore fail. This is the intended

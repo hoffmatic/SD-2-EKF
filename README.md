@@ -32,7 +32,7 @@ This is an integration scaffold, not flight-ready software.
 
 The June 14 M5 report cross-check currently fails: RocketPy predicts 3851 ft
 passive apogee versus 3379 ft in the report and only 42.7 ft/s off the reported
-72-inch rail. The closed-loop result is 2979 ft, but that does not validate
+72-inch rail. The closed-loop result is 2973 ft, but that does not validate
 target accuracy while the passive and rail-exit checks fail. These mismatches
 remain visible until the OpenRocket configuration, mass properties, and drag
 data are reconciled.
@@ -73,8 +73,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run_simulation_ui.ps1
 ```
 
 The local dashboard provides Run All/Run Suite controls, adjustable RocketPy
-trade-study inputs, scenario tables,
-details, source-gap tracking, and the complete raw terminal output. See
+trade-study inputs, scenario tables, interactive altitude/speed/acceleration/
+deployment graphs, a C++ phase timeline, CSV/JSON export, source-gap tracking,
+and the complete raw terminal output. See
 [docs/simulation_ui.md](docs/simulation_ui.md).
 
 ```powershell

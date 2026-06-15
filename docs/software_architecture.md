@@ -86,6 +86,8 @@ The browser layer is deliberately thin:
 
 - `scripts/run_simulation_ui.ps1` starts the local server.
 - `scripts/simulation_ui_server.py` serves `ui/` and dispatches run requests.
+- The server attaches `build/rocketpy-last-run.json` to RocketPy responses so
+  the browser can plot the validated sample log without scraping terminal text.
 - `ui/index.html` defines the static page structure.
 - `ui/styles.css` controls presentation only.
 - `ui/app.js` requests runs, parses suite output, and renders results.

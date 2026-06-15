@@ -34,6 +34,11 @@ http://127.0.0.1:8765
 - `Inputs` exposes the RocketPy assumptions that are useful for trade studies.
   Change values, select `Run RocketPy`, and the results will be labeled as an
   experimental-input run. `Reset Baseline` restores the reviewed configuration.
+- `Flight Data` plots the structured RocketPy/C++ time history. The altitude,
+  speed, vertical-acceleration, and deployment graphs use phase-colored
+  backgrounds and distinguish trajectory truth, virtual sensor measurements,
+  and C++ EKF estimates. Hover over a graph for the time, phase, and channel
+  values. CSV and JSON downloads preserve the complete sample log.
 
 ## Adjustable Inputs
 
@@ -64,4 +69,11 @@ Measured mass properties and aerodynamic calibration should still be committed
 to the reference configuration after team review.
 
 The UI does not change the simulation math. It calls the C++ sandboxes and the
-RocketPy runner, then parses their human-readable output.
+RocketPy runner, parses their human-readable pass/fail output, and reads
+`build/rocketpy-last-run.json` for the plotted time series. The RocketPy output
+has a separate validator that checks timestamps, fields, bounds, sampling, and
+post-apogee phase coverage before the dashboard marks the data check as passed.
+
+The acceleration graph is not raw IMU specific force. It is launch-frame
+vertical acceleration after the model assumes body-axis alignment and gravity
+compensation, which is the input contract expected by the current C++ EKF.

@@ -33,6 +33,7 @@ LAST_RUN_PATH = BUILD_ROOT / "ui-last-run.json"
 SERVER_INFO_PATH = BUILD_ROOT / "ui-server.json"
 BASE_CONFIG_PATH = REPO_ROOT / "sim" / "rocketpy" / "ambar_reference_config.json"
 UI_OVERRIDES_PATH = BUILD_ROOT / "ui-rocketpy-overrides.json"
+ROCKETPY_RESULT_PATH = BUILD_ROOT / "rocketpy-last-run.json"
 
 FEET_TO_METERS = 0.3048
 POUNDS_TO_KG = 0.45359237
@@ -128,6 +129,17 @@ def baseline_inputs() -> dict[str, float | int]:
 def public_input_schema() -> list[dict]:
     private_keys = {"path", "to_config", "from_config", "integer"}
     return [{key: value for key, value in spec.items() if key not in private_keys} for spec in INPUT_SPECS]
+
+
+def load_rocketpy_result() -> dict | None:
+    """Load the structured flight log produced by the RocketPy adapter."""
+    if not ROCKETPY_RESULT_PATH.exists():
+        return None
+    try:
+        result = json.loads(ROCKETPY_RESULT_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return result if isinstance(result, dict) else None
 
 
 def validate_inputs(requested: object) -> tuple[dict[str, float | int], dict]:
@@ -252,7 +264,9 @@ class SimulationHandler(SimpleHTTPRequestHandler):
         if self.path == "/api/last-run":
             if LAST_RUN_PATH.exists():
                 try:
-                    self.send_json(json.loads(LAST_RUN_PATH.read_text(encoding="utf-8")))
+                    payload = json.loads(LAST_RUN_PATH.read_text(encoding="utf-8"))
+                    payload["flightData"] = load_rocketpy_result()
+                    self.send_json(payload)
                 except (OSError, json.JSONDecodeError):
                     self.send_json({"lastRun": None})
             else:
@@ -318,6 +332,7 @@ class SimulationHandler(SimpleHTTPRequestHandler):
                 "output": output,
                 "inputMode": input_mode,
                 "appliedInputs": normalized_inputs,
+                "flightData": load_rocketpy_result() if suite in ("all", "rocketpy") else None,
             }
             BUILD_ROOT.mkdir(parents=True, exist_ok=True)
             LAST_RUN_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")

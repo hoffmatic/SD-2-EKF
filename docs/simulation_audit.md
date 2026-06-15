@@ -38,7 +38,7 @@ remaining calibrated to the superseded design.
 | Actuator sandbox | Exercise the `AirbrakeCommand` consumer contract | Homing gate, rate limit, retract behavior, simple jam/current fault | Motor torque, lead-screw load, backlash, friction, thermal limits, real stall-detection delay |
 | Fault/replay sandbox | Make failure policy and replay reproducibility explicit | Duplicate timestamps, NaN containment, barometer dropout propagation, deterministic synthetic-log replay | Driver freshness checks, raw hardware logs, scheduler faults |
 | Monte Carlo sandbox | Regress safety behavior across deterministic dispersion | 200 fixed-seed trials with varied provisional thrust, drag, sensors, and actuator rate | Source-backed probability of mission success or 6-DOF uncertainty |
-| RocketPy sandbox | Couple six-degree-of-freedom trajectory physics to the real C++ controller | Wind, provisional sensor errors, persistent bridge, post-burn command gating, bounded deployment, trajectory response, reference envelope | Independent apogee accuracy, measured sensor behavior, source-backed uncertainty distribution, descent/recovery behavior |
+| RocketPy sandbox | Couple six-degree-of-freedom trajectory physics to the real C++ controller | Wind, provisional sensor errors, persistent bridge, post-burn command gating, bounded deployment, trajectory response, reference envelope, Recovery entry, retraction | Independent apogee accuracy, measured sensor behavior, source-backed uncertainty distribution, parachute/recovery-system dynamics |
 | Browser console | Make suite output reviewable by the team | Launches the same scripts and exposes conditions, rules, and results | Independent verification; it parses text emitted by the simulations |
 
 ## Open Findings
@@ -66,8 +66,9 @@ remaining calibrated to the superseded design.
 
 ### Medium Priority
 
-- RocketPy terminates at apogee, so it does not verify transition to Recovery,
-  post-apogee retraction, descent, parachute interaction, or impact conditions.
+- RocketPy now continues through a bounded post-apogee controller observation
+  window and verifies Recovery entry plus airbrake retraction. It still does not
+  model parachutes, recovery electronics, landing, or deployment loads.
 - The flight phase tracker can declare liftoff from a single acceleration sample.
   Pad vibration and isolated sensor spikes are not tested for false launch.
 - Duplicate timestamps, NaN IMU input, and a barometer dropout window are now
@@ -135,7 +136,7 @@ Monte Carlo dispersion, and sensor/actuator hardware-in-the-loop tests.
 With the June 14 report inputs applied, the current RocketPy cross-check is
 openly failing: 3851 ft simulated passive apogee versus 3379 ft reported, and
 42.7 ft/s simulated rail exit versus the 52 ft/s requirement and 75.5 ft/s
-reported result. The controller produces 2979 ft inside that provisional model,
+reported result. The controller produces 2973 ft inside that provisional model,
 but this cannot be used as target-accuracy evidence until the passive vehicle
 model is reconciled.
 

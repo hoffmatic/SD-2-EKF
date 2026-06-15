@@ -12,7 +12,7 @@ because Word numbering may move as content is added.
 | `2.1.1.2 Airbrake Flight Computer Tests` | Section is empty. | Add a short test matrix covering core assertions, five flight cases, six electronics cases, four actuator cases, four fault/replay cases, and the 200-trial fixed-seed study. Explain that these are desktop software tests, not hardware qualification. | Missing evidence; `docs/project_status.md` |
 | `1.5.1 Software-in-the-Loop` | Current wording can imply that the model predicts the complete chip and vehicle. | Explain that SIL executes shared C++ logic against simplified physics and fault models. Explicitly exclude PCB power integrity, real buses, raw IMU orientation, mechanism loads, RF behavior, and manufacturing variation. | Scope correction |
 | `1.5.1.1 Flight Control Suite` | Screenshot lacks the updated fault/replay and Monte Carlo coverage. | Add the test conditions and pass rules from the new suites. Report the 200/200 safety result and the informational 15/200 target-hit count together; do not present 15/200 as a validated probability. | Current repository result |
-| `1.5.1.2 RocketPy Physics` | Earlier text/results use the older geometry and truth-level sensors. | State that the current run uses June 2 OpenRocket geometry, 3.58 m/s constant wind from 225 degrees, and deterministic provisional sensor bias/noise/quantization/latency. Report 3851 ft passive, 2979 ft closed-loop, Mach 0.494, and 42.7 ft/s rail exit. | Current run; `build/rocketpy-last-run.json` is generated locally |
+| `1.5.1.2 RocketPy Physics` | Earlier text/results use the older geometry and truth-level sensors. | State that the current run uses June 2 OpenRocket geometry, 3.58 m/s constant wind from 225 degrees, and deterministic provisional sensor bias/noise/quantization/latency. Report 3851 ft passive, 2973 ft closed-loop, Mach 0.494, and 42.7 ft/s rail exit. | Current run; `build/rocketpy-last-run.json` is generated locally |
 | RocketPy conclusions | A closed-loop result inside tolerance may be presented as proof of accuracy. | Say that -21 ft is a necessary target-band check only. The passive comparison fails by +14.0% and rail exit fails, so target accuracy is not validated. | Model limitation |
 
 ## Hardware and Architecture Corrections
@@ -67,7 +67,7 @@ For simulation conclusions, use language similar to:
 > The software-in-the-loop tests verify deterministic software reactions to
 > declared virtual inputs. They do not qualify the PCB, sensors, actuator, RF
 > link, or final vehicle aerodynamics. The current RocketPy model produces a
-> 2979 ft closed-loop apogee, but passive-model and rail-exit comparisons fail;
+> 2973 ft closed-loop apogee, but passive-model and rail-exit comparisons fail;
 > therefore, target accuracy remains provisional pending model reconciliation
 > and hardware testing.
 

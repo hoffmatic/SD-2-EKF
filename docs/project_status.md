@@ -58,9 +58,10 @@ been qualified.
 | Fault/replay scenarios | PASS, 4/4 | Timing faults, invalid input, dropout propagation, and deterministic replay are explicit |
 | Native Monte Carlo | PASS safety checks, 200/200 | Commands remained healthy and bounded; only 15/200 provisional trials hit 3000 +/-100 ft |
 | RocketPy passive reference | FAIL, 3851 ft vs 3379 ft | Vehicle mass/drag reconstruction does not yet match OpenRocket |
-| RocketPy closed-loop coupling | PASS, 2979 ft | C++ bridge and safety ordering work in the provisional model |
+| RocketPy closed-loop coupling | PASS, 2973 ft | C++ bridge and safety ordering work in the provisional model |
 | RocketPy target band | PASS, -21 ft | Necessary result only; not validated while passive-model checks fail |
 | RocketPy rail exit | FAIL, 42.7 ft/s vs 52 ft/s minimum | Model or launch configuration requires reconciliation |
+| RocketPy time-history integrity | PASS, 1727 samples through Recovery | Structured graph data is monotonic, bounded, and independently validated |
 
 ## Provisional or Unresolved
 

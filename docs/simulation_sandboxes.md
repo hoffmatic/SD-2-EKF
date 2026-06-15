@@ -92,19 +92,26 @@ What it does:
 - Applies deterministic provisional sensor bias, noise, quantization,
   saturation, and latency before feeding measurements into the real C++
   `AmbarFlightComputer` through `ambar_controller_bridge`.
+- Generates barometer measurements only at the configured barometer cadence;
+  non-sample controller ticks are stored as null rather than fake readings.
 - Applies the C++ deployment command to rate-limited RocketPy airbrakes.
 - Verifies that deployment starts only after the J420R burn time plus the
   configured post-burn margin and only while the controller reports
   `AirbrakeActive`.
 - Compares passive apogee against the M5 OpenRocket decision-matrix value.
 - Checks the M5 Mach and rail-exit requirements.
+- Continues through a short post-apogee controller-only observation window to
+  verify Recovery entry and airbrake retraction. Parachutes and landing are not
+  modeled by this window.
 - Writes machine-readable controller and trajectory data to
   `build/rocketpy-last-run.json`.
+- Runs `scripts/validate_rocketpy_output.py` to check the graph data's schema,
+  timestamp ordering, command bounds, sensor cadence, and phase coverage.
 
 The current model uses June 2 OpenRocket geometry but retains provisional dry
 mass, inertia, center of mass, and drag. It predicts 3851 ft passive versus the
 3379 ft report value and 42.7 ft/s rail exit versus the 52 ft/s minimum, so both
-checks fail visibly. Closed-loop apogee is 2979 ft, but that is not independent
+checks fail visibly. Closed-loop apogee is 2973 ft, but that is not independent
 accuracy evidence while the source-model checks fail.
 
 The bridge configures a 1.74 s minimum boost interval and checks that deployment

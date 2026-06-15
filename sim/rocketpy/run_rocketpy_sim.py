@@ -282,8 +282,17 @@ def run_passive(config: dict[str, Any]) -> Flight:
     )
 
 
-def run_closed_loop(config: dict[str, Any], bridge_path: Path) -> tuple[Flight, list[dict[str, Any]]]:
-    """Run RocketPy while the persistent C++ controller commands airbrakes."""
+def run_closed_loop(
+    config: dict[str, Any],
+    bridge_path: Path,
+    observation_end_time_s: float,
+) -> tuple[Flight, list[dict[str, Any]]]:
+    """Run RocketPy while the persistent C++ controller commands airbrakes.
+
+    The closed-loop run continues briefly after apogee. This does not model the
+    recovery system; it exists so the controller's Recovery transition and the
+    actuator's commanded retraction are visible in the time-history output.
+    """
     environment = build_environment(config)
     rocket = build_rocket(config, build_motor(config))
     airbrake_config = config["airbrakes"]
@@ -300,8 +309,8 @@ def run_closed_loop(config: dict[str, Any], bridge_path: Path) -> tuple[Flight, 
     )
     log: list[dict[str, Any]] = []
     previous_time: float | None = None
-    previous_velocity = 0.0
-    next_barometer_time = 0.0
+    previous_velocity_vector = (0.0, 0.0, 0.0)
+    next_barometer_time = 1.0 / airbrake_config["barometer_rate_hz"]
     actual_deployment = 0.0
     sensor_model = SensorModel(config)
     truth_history: deque[tuple[float, float, float]] = deque()
@@ -317,29 +326,41 @@ def run_closed_loop(config: dict[str, Any], bridge_path: Path) -> tuple[Flight, 
         controller_environment: Environment,
     ) -> tuple[float, float, float, float, str, bool] | None:
         del state_history, observed_variables, sensors
-        nonlocal previous_time, previous_velocity, next_barometer_time, actual_deployment
+        nonlocal previous_time, previous_velocity_vector, next_barometer_time, actual_deployment
 
         if previous_time is not None and time <= previous_time + 1e-9:
             air_brakes.deployment_level = actual_deployment
             return None
 
-        velocity_mps = float(state[5])
+        velocity_vector_mps = (float(state[3]), float(state[4]), float(state[5]))
+        velocity_mps = velocity_vector_mps[2]
+        speed_mps = math.sqrt(sum(component * component for component in velocity_vector_mps))
         altitude_m = max(0.0, float(state[2]) - controller_environment.elevation)
         if previous_time is None:
             previous_time = time
-            previous_velocity = velocity_mps
+            previous_velocity_vector = velocity_vector_mps
             air_brakes.deployment_level = 0.0
+            truth_history.append((time, 0.0, altitude_m))
             log.append(
                 {
                     "time_s": time,
                     "truth_altitude_m": altitude_m,
                     "truth_velocity_mps": velocity_mps,
+                    "truth_speed_mps": speed_mps,
+                    "truth_acceleration_mps2": 0.0,
+                    "truth_acceleration_magnitude_mps2": 0.0,
                     "measured_acceleration_mps2": 0.0,
+                    "measured_altitude_m": None,
+                    "barometer_sample": False,
+                    "measurement_source_time_s": time,
                     "estimated_altitude_m": bridge.state.altitude_m,
                     "estimated_velocity_mps": bridge.state.velocity_mps,
                     "predicted_apogee_m": bridge.state.predicted_apogee_m,
                     "command_fraction": 0.0,
+                    "desired_deployment_fraction": 0.0,
                     "actual_deployment_fraction": 0.0,
+                    "inhibit": bridge.state.inhibit,
+                    "inhibit_flags": bridge.state.inhibit_flags,
                     "phase": bridge.state.phase,
                     "healthy": bridge.state.healthy,
                 }
@@ -347,13 +368,20 @@ def run_closed_loop(config: dict[str, Any], bridge_path: Path) -> tuple[Flight, 
             return None
         else:
             dt_s = time - previous_time
-            acceleration_mps2 = (velocity_mps - previous_velocity) / dt_s
+            acceleration_vector_mps2 = tuple(
+                (current - previous) / dt_s
+                for current, previous in zip(velocity_vector_mps, previous_velocity_vector)
+            )
+            acceleration_mps2 = acceleration_vector_mps2[2]
+            acceleration_magnitude_mps2 = math.sqrt(
+                sum(component * component for component in acceleration_vector_mps2)
+            )
 
         truth_history.append((time, acceleration_mps2, altitude_m))
         delayed_time = time - config["sensor_model"]["latency_s"]
         while len(truth_history) > 1 and truth_history[1][0] <= delayed_time:
             truth_history.popleft()
-        _, delayed_acceleration_mps2, delayed_altitude_m = truth_history[0]
+        measurement_source_time_s, delayed_acceleration_mps2, delayed_altitude_m = truth_history[0]
         measured_acceleration_mps2 = sensor_model.acceleration(
             delayed_acceleration_mps2
         )
@@ -361,12 +389,14 @@ def run_closed_loop(config: dict[str, Any], bridge_path: Path) -> tuple[Flight, 
         use_barometer = time + 1e-9 >= next_barometer_time
         if use_barometer:
             next_barometer_time += 1.0 / airbrake_config["barometer_rate_hz"]
-        measured_altitude_m = sensor_model.altitude(delayed_altitude_m)
+        measured_altitude_m = (
+            sensor_model.altitude(delayed_altitude_m) if use_barometer else None
+        )
 
         bridge_state = bridge.step(
             timestamp_s=time,
             acceleration_mps2=measured_acceleration_mps2,
-            altitude_m=measured_altitude_m,
+            altitude_m=measured_altitude_m if measured_altitude_m is not None else 0.0,
             altitude_std_dev_m=config["sensor_model"]["barometer_measurement_std_dev_m"],
             use_barometer=use_barometer,
         )
@@ -384,20 +414,27 @@ def run_closed_loop(config: dict[str, Any], bridge_path: Path) -> tuple[Flight, 
                 "time_s": time,
                 "truth_altitude_m": altitude_m,
                 "truth_velocity_mps": velocity_mps,
+                "truth_speed_mps": speed_mps,
                 "truth_acceleration_mps2": acceleration_mps2,
+                "truth_acceleration_magnitude_mps2": acceleration_magnitude_mps2,
                 "measured_acceleration_mps2": measured_acceleration_mps2,
                 "measured_altitude_m": measured_altitude_m,
+                "barometer_sample": use_barometer,
+                "measurement_source_time_s": measurement_source_time_s,
                 "estimated_altitude_m": bridge_state.altitude_m,
                 "estimated_velocity_mps": bridge_state.velocity_mps,
                 "predicted_apogee_m": bridge_state.predicted_apogee_m,
                 "command_fraction": bridge_state.deploy_fraction,
+                "desired_deployment_fraction": desired_deployment,
                 "actual_deployment_fraction": actual_deployment,
+                "inhibit": bridge_state.inhibit,
+                "inhibit_flags": bridge_state.inhibit_flags,
                 "phase": bridge_state.phase,
                 "healthy": bridge_state.healthy,
             }
         )
         previous_time = time
-        previous_velocity = velocity_mps
+        previous_velocity_vector = velocity_vector_mps
         return (
             time,
             actual_deployment,
@@ -428,14 +465,82 @@ def run_closed_loop(config: dict[str, Any], bridge_path: Path) -> tuple[Flight, 
             rail_length=values["rail_length_m"],
             inclination=values["inclination_deg"],
             heading=values["heading_deg"],
-            terminate_on_apogee=True,
-            max_time=40,
+            terminate_on_apogee=False,
+            max_time=observation_end_time_s,
             max_time_step=0.01,
             verbose=False,
         )
     finally:
         bridge.close()
     return flight, log
+
+
+def derive_phase_transitions(log: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Compress the sample-by-sample phase field into a readable timeline."""
+    transitions: list[dict[str, Any]] = []
+    for entry in log:
+        if not transitions or transitions[-1]["phase"] != entry["phase"]:
+            transitions.append(
+                {
+                    "time_s": entry["time_s"],
+                    "phase": entry["phase"],
+                    "altitude_m": entry["truth_altitude_m"],
+                    "vertical_velocity_mps": entry["truth_velocity_mps"],
+                    "deployment_fraction": entry["actual_deployment_fraction"],
+                }
+            )
+    return transitions
+
+
+def validate_controller_log(log: list[dict[str, Any]]) -> list[str]:
+    """Return human-readable integrity errors for the exported time history."""
+    if len(log) < 2:
+        return ["controller log contains fewer than two samples"]
+
+    errors: list[str] = []
+    required_numeric_fields = (
+        "time_s",
+        "truth_altitude_m",
+        "truth_velocity_mps",
+        "truth_speed_mps",
+        "truth_acceleration_mps2",
+        "truth_acceleration_magnitude_mps2",
+        "measured_acceleration_mps2",
+        "measurement_source_time_s",
+        "estimated_altitude_m",
+        "estimated_velocity_mps",
+        "predicted_apogee_m",
+        "command_fraction",
+        "desired_deployment_fraction",
+        "actual_deployment_fraction",
+    )
+    previous_time = -math.inf
+    for index, entry in enumerate(log):
+        missing = [field for field in required_numeric_fields if field not in entry]
+        if missing:
+            errors.append(f"sample {index} is missing {', '.join(missing)}")
+            continue
+        if not all(math.isfinite(float(entry[field])) for field in required_numeric_fields):
+            errors.append(f"sample {index} contains a non-finite numeric value")
+        if entry["time_s"] <= previous_time:
+            errors.append(f"sample {index} timestamp is not strictly increasing")
+        previous_time = entry["time_s"]
+        if entry["measurement_source_time_s"] > entry["time_s"] + 1.0e-9:
+            errors.append(f"sample {index} uses a measurement from the future")
+        if entry["barometer_sample"]:
+            measured_altitude = entry["measured_altitude_m"]
+            if measured_altitude is None or not math.isfinite(float(measured_altitude)):
+                errors.append(f"sample {index} marks an invalid barometer sample")
+        elif entry["measured_altitude_m"] is not None:
+            errors.append(f"sample {index} reports a barometer value between samples")
+        if not 0.0 <= entry["command_fraction"] <= 1.0:
+            errors.append(f"sample {index} command is outside [0, 1]")
+        if not 0.0 <= entry["actual_deployment_fraction"] <= 1.0:
+            errors.append(f"sample {index} deployment is outside [0, 1]")
+        if len(errors) >= 20:
+            errors.append("additional log errors omitted")
+            break
+    return errors
 
 
 def print_case(number: int, name: str, condition: str, rule: str, passed: bool, result: str, measurements: dict[str, str], note: str = "") -> None:
@@ -488,7 +593,13 @@ def main() -> int:
     print("PASS/FAIL meaning: PASS verifies software coupling and stated reference-model behavior; it does not validate unresolved mass or aerodynamic inputs.")
 
     passive = run_passive(config)
-    closed, controller_log = run_closed_loop(config, args.bridge.resolve())
+    post_apogee_observation_s = config["airbrakes"]["post_apogee_observation_s"]
+    observation_end_time_s = passive.apogee_time + post_apogee_observation_s
+    closed, controller_log = run_closed_loop(
+        config,
+        args.bridge.resolve(),
+        observation_end_time_s,
+    )
 
     passive_apogee_ft = passive.apogee * METERS_TO_FEET
     closed_apogee_ft = closed.apogee * METERS_TO_FEET
@@ -544,6 +655,30 @@ def main() -> int:
             abs(entry["estimated_velocity_mps"] - entry["truth_velocity_mps"])
             for entry in controller_log
         ),
+        default=0.0,
+    )
+    phase_transitions = derive_phase_transitions(controller_log)
+    phase_names = {transition["phase"] for transition in phase_transitions}
+    log_integrity_errors = validate_controller_log(controller_log)
+    barometer_sample_count = sum(
+        1 for entry in controller_log if entry["barometer_sample"]
+    )
+    recovery_observed = "Recovery" in phase_names
+    final_deployment = (
+        controller_log[-1]["actual_deployment_fraction"] if controller_log else 0.0
+    )
+    retraction_observed = peak_deployment > 0.05 and final_deployment <= 0.02
+    time_history_pass = (
+        not log_integrity_errors
+        and recovery_observed
+        and retraction_observed
+        and barometer_sample_count > 0
+    )
+    maximum_speed_mps = max(
+        (entry["truth_speed_mps"] for entry in controller_log), default=0.0
+    )
+    maximum_vertical_acceleration_mps2 = max(
+        (abs(entry["truth_acceleration_mps2"]) for entry in controller_log),
         default=0.0,
     )
 
@@ -650,11 +785,31 @@ def main() -> int:
             "M5 reported rail exit velocity": f"{requirements['m5_reported_rail_exit_velocity_fps']:.1f} ft/s",
         },
     )
+    print_case(
+        5,
+        "flight-data integrity and recovery observation",
+        "The exported controller time history is checked for monotonic timestamps, finite values, sparse barometer sampling, bounded commands, Recovery entry, and physical airbrake retraction after apogee.",
+        "PASS if the log is internally consistent, Recovery is observed, at least one barometer sample exists, and rate-limited deployment returns below 2% during the post-apogee observation window.",
+        time_history_pass,
+        "The plotted data passed its structural checks and includes the post-apogee controller transition." if time_history_pass else "The plotted data or post-apogee controller behavior did not meet its declared integrity rule.",
+        {
+            "controller samples": str(len(controller_log)),
+            "barometer samples": str(barometer_sample_count),
+            "phase sequence": " -> ".join(transition["phase"] for transition in phase_transitions),
+            "closed-loop apogee time": f"{closed.apogee_time:.2f} s",
+            "observation end": f"{observation_end_time_s:.2f} s",
+            "peak deployment": f"{peak_deployment * 100.0:.1f}%",
+            "final deployment": f"{final_deployment * 100.0:.1f}%",
+            "integrity errors": str(len(log_integrity_errors)),
+        },
+        "Recovery-system descent and parachute dynamics are not modeled. This window verifies only flight-computer phase handling and airbrake retraction.",
+    )
 
     RESULT_PATH.parent.mkdir(parents=True, exist_ok=True)
     RESULT_PATH.write_text(
         json.dumps(
             {
+                "schemaVersion": 2,
                 "modelStatus": config["model_status"],
                 "inputMode": "experimental-overrides" if args.overrides else "report-baseline",
                 "appliedConfig": {
@@ -693,13 +848,38 @@ def main() -> int:
                     "commandPhasesValid": command_phases_valid,
                     "maximumAltitudeErrorM": maximum_altitude_error_m,
                     "maximumVelocityErrorMps": maximum_velocity_error_mps,
+                    "apogeeTimeS": closed.apogee_time,
+                    "observationEndTimeS": observation_end_time_s,
+                    "maximumSpeedMps": maximum_speed_mps,
+                    "maximumVerticalAccelerationMps2": maximum_vertical_acceleration_mps2,
+                    "barometerSampleCount": barometer_sample_count,
+                    "finalDeploymentFraction": final_deployment,
                 },
                 "acceptance": {
                     "passiveReferencePass": bool(passive_pass),
                     "couplingSafetyPass": bool(coupling_pass),
                     "targetAttainmentPass": bool(target_pass),
                     "flightEnvelopePass": bool(envelope_pass),
+                    "timeHistoryPass": bool(time_history_pass),
                 },
+                "phaseTransitions": phase_transitions,
+                "seriesMetadata": {
+                    "truth": "RocketPy trajectory state sampled at the controller callback rate.",
+                    "sensor": "Deterministic delayed, biased, noisy, quantized virtual measurements supplied to the C++ bridge.",
+                    "estimate": "State produced by the repository's C++ vertical EKF.",
+                    "truth_acceleration_mps2": "Net vertical acceleration in the launch/navigation frame, positive upward.",
+                    "measured_acceleration_mps2": "Virtual launch-frame vertical acceleration after assumed IMU alignment and gravity compensation; this is not raw body-axis specific force.",
+                    "measured_altitude_m": "Barometric altitude sample. Null means the barometer was not sampled on that controller tick.",
+                    "command_fraction": "C++ controller request before actuator rate limiting.",
+                    "actual_deployment_fraction": "Deployment applied to RocketPy after the configured actuator rate limit.",
+                },
+                "limitations": [
+                    "Mass, center of gravity, inertia, rocket drag, and airbrake drag remain provisional.",
+                    "The virtual accelerometer starts from gravity-compensated launch-frame vertical acceleration; raw three-axis IMU, attitude estimation, axis misalignment, and vibration are not modeled.",
+                    "The post-apogee window does not model parachutes, recovery electronics, landing, or deployment loads.",
+                    "The embedded apogee predictor is ballistic and is not calibrated to the provisional RocketPy drag model.",
+                ],
+                "logIntegrityErrors": log_integrity_errors,
                 "controllerLog": controller_log,
                 "provenance": config["provenance"],
             },
@@ -715,10 +895,11 @@ def main() -> int:
     print(f"C++ closed-loop airbrakes    {'PASS' if coupling_pass else 'FAIL'}")
     print(f"Closed-loop target           {'PASS' if target_pass else 'FAIL'}")
     print(f"M5 flight envelope checks    {'PASS' if envelope_pass else 'FAIL'}")
+    print(f"Flight-data integrity        {'PASS' if time_history_pass else 'FAIL'}")
     # Keep terminal output portable and independent of the user's checkout path.
     print("\nMachine-readable results: build/rocketpy-last-run.json")
     print("Next model inputs needed: measured flight-ready mass/CG/inertia, final OpenRocket .ork export, and airbrake drag coefficient vs Mach/deployment.")
-    return 0 if passive_pass and coupling_pass and target_pass and envelope_pass else 1
+    return 0 if passive_pass and coupling_pass and target_pass and envelope_pass and time_history_pass else 1
 
 
 if __name__ == "__main__":

@@ -40,7 +40,8 @@
     "post_burn_enable_margin_s": 0.10,
     "maximum_rate_fraction_per_s": 1.55,
     "drag_coefficient_at_full_deployment": 0.95,
-    "barometer_rate_hz": 50.0
+    "barometer_rate_hz": 50.0,
+    "post_apogee_observation_s": 2.0
   },
   "sensor_model": {
     "random_seed": 424242,
