@@ -58,7 +58,9 @@ bench testing, simulation replay, and hardware-in-the-loop testing.
    logger, and scheduler.
 2. Replace the demo apogee predictor with an embedded drag-aware model calibrated
    from the new RocketPy backend, final OpenRocket data, ground tests, and logs.
-3. Add unit tests and replay tests using simulated and recorded flight data.
+3. Replace the current synthetic replay fixture with recorded flight-computer
+   data and add hardware-in-the-loop coverage. Core unit and synthetic replay
+   tests now run in CTest/GitHub Actions.
 4. Add telemetry packets for estimate, phase, command, health, and rejection
    counters.
 5. Tune noise, gating, and phase thresholds from bench and flight data.

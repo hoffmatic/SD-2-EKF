@@ -30,12 +30,13 @@ the report.
 | Launch latitude | 27.93469 deg | Model input | RocketPy environment |
 | Launch longitude | -80.70953 deg | Model input | RocketPy environment |
 | Launch elevation | 23 ft | Model input | RocketPy environment |
-| Average wind | 3.58 m/s, approximately 8 mph | Model input | Recorded for future wind model |
-| Wind standard deviation | 0.358 m/s | Model input | Recorded for future dispersion |
-| Turbulence intensity | 10% | Model input | Recorded for future dispersion |
+| Average wind | 3.58 m/s, approximately 8 mph | Model input | Applied as constant nominal wind |
+| Wind standard deviation | 0.358 m/s | Model input | Recorded for future RocketPy dispersion |
+| Turbulence intensity | 10% | Model input | Recorded for future turbulence modeling |
 
-The current RocketPy environment still uses a standard atmosphere because the
-simulation does not yet ingest the report's wind distribution.
+The current RocketPy environment uses standard pressure/temperature profiles
+with a constant 3.58 m/s horizontal wind from 225 degrees. Wind dispersion and
+turbulence are not yet part of the RocketPy run.
 
 ## Rocket And Recovery Data
 
@@ -58,8 +59,9 @@ simulation does not yet ingest the report's wind distribution.
 | Main ejection charge | approximately 1.28 g | Reported calculation; requires ground test |
 | Drogue ejection charge | approximately 0.73 g | Reported calculation; requires ground test |
 
-Dry mass, loaded mass, center of gravity, moments of inertia, nose geometry,
-component axial positions, and the current `.ork` file remain unavailable.
+The June 2 OpenRocket file supplies current body/nose/fin geometry and component
+layout, but final measured dry/loaded mass, center of gravity, moments of
+inertia, and reusable drag exports remain unavailable.
 
 ## Airbrake Aerodynamic And Structural Data
 
@@ -123,20 +125,20 @@ measurements.
 After applying the June 14 launch conditions and stabilizing-fin geometry, the
 provisional RocketPy model reports:
 
-- Passive apogee: 3955 ft versus 3379 ft in the report, a +17.1% mismatch.
+- Passive apogee: 3851 ft versus 3379 ft in the report, a +14.0% mismatch.
 - Rail exit: 42.7 ft/s versus the 52 ft/s requirement and 75.5 ft/s report
   result.
-- Maximum Mach: 0.495 versus 0.509 in the report.
-- Closed-loop apogee: 3016 ft, but this is not a validated target result because
+- Maximum Mach: 0.494 versus 0.509 in the report.
+- Closed-loop apogee: 2973 ft, but this is not a validated target result because
   the passive vehicle model fails its source comparison.
 
 The passive-reference and rail-exit tests therefore fail. This is the intended
-behavior until the missing `.ork` file, mass properties, and drag data explain
-the discrepancy.
+behavior until the OpenRocket configuration is rerun and the mass properties
+and drag data explain the discrepancy.
 
 ## Data Still Needed
 
-- Current OpenRocket `.ork` file and exported simulation CSV.
+- Rerun current OpenRocket configuration and exported simulation CSV.
 - Flight-ready mass, CG, and inertia with measurement uncertainty.
 - Airbrake drag increment versus deployment and Mach using a declared reference
   area.

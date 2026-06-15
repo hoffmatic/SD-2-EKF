@@ -48,6 +48,11 @@ and runs everything currently useful on a normal computer:
 - `sim_flight_sandbox.exe`: simulated rocket flight behavior.
 - `sim_electronics_sandbox.exe`: virtual PCB/electronics bring-up checks.
 - `sim_actuator_sandbox.exe`: virtual airbrake motor and jam/fault behavior.
+- `sim_fault_replay_sandbox.exe`: timestamp, invalid-sensor, dropout, and log
+  replay checks.
+- `sim_monte_carlo_sandbox.exe`: 200 repeatable variations that check command
+  safety and report how often the provisional model reaches the target band.
+- `ambar_core_tests.exe`: focused checks of estimator and controller rules.
 - `RocketPy physics sandbox`: a six-degree-of-freedom rocket trajectory whose
   virtual airbrakes are commanded by the real C++ AMBAR estimator/controller.
 
@@ -75,7 +80,10 @@ first results.
 
 - `PASS` means the software reacted the expected way for that virtual test.
 - `WARN` means the project still has an open engineering question.
-- `FAIL` means the software did not react the way the test expected.
+- `FAIL` means a stated criterion was not met. The current RocketPy passive
+  reference and rail-exit checks intentionally fail because the model and
+  OpenRocket data are not reconciled; this is an engineering finding, not a
+  broken installation.
 - `BLOCKED` means a virtual boot condition should stop flight logic or arming.
 - `cmd_%` means the software command to the airbrake.
 - `act_%` means the simulated physical airbrake position.
@@ -96,11 +104,15 @@ M5 report still requires a separate GPS device in the rocket recovery system.
 
 - `README.md`: the front page of the project.
 - `docs\project_requirements.md`: what the rocket needs the software to do.
+- `docs\project_status.md`: what is implemented, simulated, provisional, and
+  still future work.
 - `docs\hardware_map.md`: how the current PCB parts and STM32 pins map to code.
 - `docs\datasheet_integration_notes.md`: datasheet facts reflected in code.
 - `docs\simulation_sandboxes.md`: deeper explanation of the sandboxes.
 - `docs\sensor_architecture.md`: why the magnetometer and recovery GPS are
   separate subsystems.
+- `docs\m5_report_change_guide.md`: exact report corrections for you to make
+  manually in Word.
 
 ## If Something Fails
 

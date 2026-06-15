@@ -21,7 +21,9 @@ http://127.0.0.1:8765
 
 ## Controls
 
-- `Run All` runs the flight, RocketPy physics, electronics, and actuator suites.
+- `Run All` runs core assertions, fault/replay, Monte Carlo, flight,
+  electronics, actuator, and RocketPy checks. The dashboard summarizes the four
+  main suites; the complete added-suite output remains available in Raw Output.
 - `Run Suite` runs only the currently selected suite.
 - `Rebuild` recompiles before running. Leave it off for faster repeat runs.
 - Select a scenario row to inspect its condition, pass rule, measurements, and
@@ -32,17 +34,24 @@ http://127.0.0.1:8765
 - `Inputs` exposes the RocketPy assumptions that are useful for trade studies.
   Change values, select `Run RocketPy`, and the results will be labeled as an
   experimental-input run. `Reset Baseline` restores the reviewed configuration.
+- `Flight Data` plots the structured RocketPy/C++ time history. The altitude,
+  speed, vertical-acceleration, and deployment graphs use phase-colored
+  backgrounds and distinguish trajectory truth, virtual sensor measurements,
+  and C++ EKF estimates. Hover over a graph for the time, phase, and channel
+  values. CSV and JSON downloads preserve the complete sample log.
 
 ## Adjustable Inputs
 
 The Inputs view groups controls by their engineering role:
 
 - Mission: target apogee.
-- Launch: rail length, angle from vertical, and heading.
+- Launch: rail length, angle from vertical, heading, constant wind speed, and
+  wind-from direction.
 - Vehicle: dry mass, powered/coast drag coefficients, and stabilizing-fin geometry.
 - Airbrake: post-burn inhibit margin, deployment-rate limit, and full-deployment
   drag increment.
-- Sensors: controller and barometer rates plus simulated barometer noise.
+- Sensors: controller/barometer rates plus provisional accelerometer bias/noise,
+  barometer bias/noise, and latency.
 
 Every field has a bounded numeric range enforced by the local Python server.
 Values outside that range are rejected before RocketPy starts. A changed value
@@ -60,4 +69,11 @@ Measured mass properties and aerodynamic calibration should still be committed
 to the reference configuration after team review.
 
 The UI does not change the simulation math. It calls the C++ sandboxes and the
-RocketPy runner, then parses their human-readable output.
+RocketPy runner, parses their human-readable pass/fail output, and reads
+`build/rocketpy-last-run.json` for the plotted time series. The RocketPy output
+has a separate validator that checks timestamps, fields, bounds, sampling, and
+post-apogee phase coverage before the dashboard marks the data check as passed.
+
+The acceleration graph is not raw IMU specific force. It is launch-frame
+vertical acceleration after the model assumes body-axis alignment and gravity
+compensation, which is the input contract expected by the current C++ EKF.

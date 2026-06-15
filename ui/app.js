@@ -10,6 +10,16 @@ const SUITE_META = {
   actuator: { label: "Actuator Suite", symbol: "⌁" }
 };
 
+const METERS_TO_FEET = 3.280839895;
+const PHASE_COLORS = {
+  PadIdle: "#f2f4f7",
+  Boost: "#fff4d6",
+  Coast: "#e9f7fb",
+  AirbrakeActive: "#e9f0ff",
+  Recovery: "#e8f7ef",
+  Fault: "#fdecec"
+};
+
 const baselineData = {
   mode: "baseline",
   timestamp: null,
@@ -31,9 +41,11 @@ const baselineData = {
     rocketpy: {
       overall: "FAIL",
       scenarios: [
-        scenario("M5 passive reference", "FAIL", "RocketPy runs the June 14 M5 launch conditions and stabilizing-fin geometry with the selected AeroTech J420R and no airbrake deployment.", "RocketPy completes and passive apogee remains within 10% of the current 3379 ft M5 OpenRocket value.", "The provisional model predicts 3955 ft, 17.1% above the current report value.", { "RocketPy passive apogee": "3955 ft", "M5 OpenRocket apogee": "3379 ft", "difference": "+17.1%", "maximum Mach": "0.495", "rail exit velocity": "42.7 ft/s" }, "FAIL is intentional: current mass, CG, inertia, and drag data are missing, so the model was not retuned to force agreement."),
-        scenario("C++ closed-loop airbrakes", "PASS", "RocketPy feeds virtual IMU/barometer measurements into the real C++ AMBAR flight computer and applies its rate-limited airbrake command.", "The estimator stays healthy, commands remain bounded, deployment begins after burnout plus margin, commands occur only in AirbrakeActive, and apogee is reduced by more than 50 ft.", "The controller reduced this provisional trajectory from 3955 ft to 3016 ft without commanding before the post-burn enable time.", { "closed-loop apogee": "3016 ft", "target error": "+16 ft", "apogee reduction": "940 ft", "motor burn end": "1.64 s", "minimum deploy time": "1.74 s", "first C++ command": "1.78 s", "C++ command range": "0.0% to 100.0%", "estimator healthy": "yes" }, "Controller coupling passed, but target accuracy is not validated because the passive vehicle model failed its source comparison."),
-        scenario("M5 flight envelope checks", "FAIL", "The closed-loop RocketPy trajectory is checked against the M5 subsonic and minimum rail-exit requirements.", "Maximum Mach is no greater than 1.0 and rail-exit velocity is at least 52 ft/s.", "The trajectory stayed subsonic but left the 72-inch rail too slowly.", { "maximum Mach": "0.495", "Mach limit": "1.0", "minimum rail exit velocity": "42.7 ft/s", "rail exit minimum": "52.0 ft/s", "M5 reported rail exit velocity": "75.5 ft/s" })
+        scenario("M5 passive reference", "FAIL", "RocketPy runs the June 2 OpenRocket geometry and June 14 M5 launch conditions with the selected AeroTech J420R and no airbrake deployment.", "RocketPy completes and passive apogee remains within 10% of the current 3379 ft M5 OpenRocket value.", "The provisional model predicts 3851 ft, 14.0% above the current report value.", { "RocketPy passive apogee": "3851 ft", "M5 OpenRocket apogee": "3379 ft", "difference": "+14.0%", "maximum Mach": "0.494", "rail exit velocity": "42.7 ft/s" }, "FAIL is intentional: current mass, CG, inertia, and drag data are unresolved, so the model was not retuned to force agreement."),
+        scenario("C++ closed-loop airbrakes", "PASS", "RocketPy feeds delayed, noisy virtual IMU/barometer measurements into the real C++ AMBAR flight computer and applies its rate-limited airbrake command.", "The estimator stays healthy, commands remain bounded, deployment begins after burnout plus margin, commands occur only in AirbrakeActive, and apogee is reduced by more than 50 ft.", "The controller reduced this provisional trajectory from 3851 ft to 2973 ft without commanding before the post-burn enable time.", { "closed-loop apogee": "2973 ft", "target error": "-27 ft", "apogee reduction": "879 ft", "motor burn end": "1.64 s", "minimum deploy time": "1.74 s", "first C++ command": "1.82 s", "C++ command range": "0.0% to 100.0%", "maximum altitude error": "3.64 m", "maximum velocity error": "6.54 m/s", "estimator healthy": "yes" }, "Controller coupling passed, but target accuracy is not validated because the passive vehicle model failed its source comparison."),
+        scenario("closed-loop target attainment", "PASS", "The provisional closed-loop apogee is compared directly with 3000 +/-100 ft.", "Closed-loop apogee is between 2900 ft and 3100 ft.", "The provisional result is inside the band, but source-model failures prevent a validation claim.", { "closed-loop apogee": "2973 ft", "target error": "-27 ft" }, "This is a necessary target-band check, not sufficient validation."),
+        scenario("M5 flight envelope checks", "FAIL", "The closed-loop RocketPy trajectory is checked against the M5 subsonic and minimum rail-exit requirements.", "Maximum Mach is no greater than 1.0 and rail-exit velocity is at least 52 ft/s.", "The trajectory stayed subsonic but left the 72-inch rail too slowly.", { "maximum Mach": "0.494", "Mach limit": "1.0", "minimum rail exit velocity": "42.7 ft/s", "rail exit minimum": "52.0 ft/s", "M5 reported rail exit velocity": "75.5 ft/s" }),
+        scenario("flight-data integrity and recovery observation", "PASS", "The structured log is checked through a short post-apogee controller observation window.", "Timestamps and values remain valid, Recovery is observed, barometer samples are sparse, and deployment retracts below 2%.", "The time history passed its integrity checks and showed PadIdle, Boost, AirbrakeActive, and Recovery.", { "controller samples": "1727", "barometer samples": "864", "final deployment": "0.0%", "integrity errors": "0" }, "Parachutes, recovery electronics, landing, and deployment loads are not modeled.")
       ]
     },
     electronics: {
@@ -77,7 +89,8 @@ const state = {
   inputBaseline: {},
   inputValues: {},
   fixedCriteria: {},
-  inputMode: "report-baseline"
+  inputMode: "report-baseline",
+  flightData: null
 };
 
 const el = (id) => document.getElementById(id);
@@ -161,10 +174,12 @@ function renderSummary() {
 function renderWorkspace() {
   const sourcesVisible = state.activeView === "sources";
   const inputsVisible = state.activeView === "inputs";
-  const specialViewVisible = sourcesVisible || inputsVisible;
+  const flightDataVisible = state.activeView === "flightdata";
+  const specialViewVisible = sourcesVisible || inputsVisible || flightDataVisible;
   el("app").classList.toggle("workspace-wide", specialViewVisible);
   el("summary-section").classList.toggle("hidden", specialViewVisible);
   el("suite-content").classList.toggle("hidden", specialViewVisible);
+  el("flight-data-content").classList.toggle("hidden", !flightDataVisible);
   el("inputs-content").classList.toggle("hidden", !inputsVisible);
   el("sources-content").classList.toggle("hidden", !sourcesVisible);
 
@@ -175,6 +190,11 @@ function renderWorkspace() {
 
   if (inputsVisible) {
     renderInputs();
+    return;
+  }
+
+  if (flightDataVisible) {
+    renderFlightData();
     return;
   }
 
@@ -233,7 +253,7 @@ function bindScenarioRows() {
 }
 
 function renderInspector() {
-  const specialViewVisible = state.activeView === "sources" || state.activeView === "inputs";
+  const specialViewVisible = state.activeView === "sources" || state.activeView === "inputs" || state.activeView === "flightdata";
   el("inspector").classList.toggle("hidden", !state.inspectorOpen || specialViewVisible);
   if (!state.inspectorOpen || specialViewVisible) return;
 
@@ -259,6 +279,366 @@ function whatThisProves(suite, item) {
   if (suite === "rocketpy") return `This verifies RocketPy-to-C++ closed-loop integration using the versioned M5 reference model. Final prediction accuracy still depends on measured mass properties and aerodynamic data. ${item.result}`;
   if (suite === "electronics") return `This verifies the modeled boot-decision logic and constant checks. It does not measure the physical PCB, power integrity, or bus waveforms. ${item.result}`;
   return `This verifies the virtual actuator safety behavior using the current model. Final motor torque, current, travel, and timing still require bench measurements. ${item.result}`;
+}
+
+function deriveClientPhaseTransitions(log) {
+  const transitions = [];
+  log.forEach((sample) => {
+    if (!transitions.length || transitions[transitions.length - 1].phase !== sample.phase) {
+      transitions.push({
+        time_s: sample.time_s,
+        phase: sample.phase,
+        altitude_m: sample.truth_altitude_m,
+        vertical_velocity_mps: sample.truth_velocity_mps,
+        deployment_fraction: sample.actual_deployment_fraction
+      });
+    }
+  });
+  return transitions;
+}
+
+function finiteMaximum(values, fallback = 0) {
+  const finite = values.filter(Number.isFinite);
+  return finite.length ? Math.max(...finite) : fallback;
+}
+
+function flightChartDefinitions(data) {
+  const log = data.controllerLog || [];
+  const targetFt = Number(data.appliedConfig?.requirements?.target_apogee_ft ?? 3000);
+  const times = log.map((sample) => Number(sample.time_s));
+  const series = (label, color, values, options = {}) => ({ label, color, values, ...options });
+  return [
+    {
+      id: "altitude",
+      title: "Altitude and predicted apogee",
+      subtitle: "RocketPy truth, sparse barometer samples, C++ EKF estimate, and controller prediction",
+      unit: "ft AGL",
+      includeZero: true,
+      times,
+      series: [
+        series("RocketPy truth", "#175cd3", log.map((sample) => sample.truth_altitude_m * METERS_TO_FEET)),
+        series("Barometer sample", "#b54708", log.map((sample) => sample.measured_altitude_m == null ? null : sample.measured_altitude_m * METERS_TO_FEET), { pointsOnly: true }),
+        series("C++ EKF estimate", "#067647", log.map((sample) => sample.estimated_altitude_m * METERS_TO_FEET)),
+        series("Predicted apogee", "#6941c6", log.map((sample) => sample.predicted_apogee_m * METERS_TO_FEET), { dash: [5, 4] }),
+        series("Mission target", "#b42318", log.map(() => targetFt), { dash: [2, 4] })
+      ]
+    },
+    {
+      id: "speed",
+      title: "Speed and vertical velocity",
+      subtitle: "Total 3D speed is RocketPy truth; vertical channels show estimator tracking and descent sign",
+      unit: "ft/s",
+      includeZero: true,
+      times,
+      series: [
+        series("Total speed", "#175cd3", log.map((sample) => Number(sample.truth_speed_mps ?? Math.abs(sample.truth_velocity_mps)) * METERS_TO_FEET)),
+        series("True vertical velocity", "#b54708", log.map((sample) => sample.truth_velocity_mps * METERS_TO_FEET), { dash: [5, 4] }),
+        series("Estimated vertical velocity", "#067647", log.map((sample) => sample.estimated_velocity_mps * METERS_TO_FEET))
+      ]
+    },
+    {
+      id: "acceleration",
+      title: "Vertical acceleration",
+      subtitle: "Launch-frame net acceleration after assumed alignment and gravity compensation, not raw body-axis IMU data",
+      unit: "ft/s^2",
+      includeZero: true,
+      times,
+      series: [
+        series("RocketPy vertical truth", "#175cd3", log.map((sample) => sample.truth_acceleration_mps2 * METERS_TO_FEET)),
+        series("Virtual sensor supplied to C++", "#b54708", log.map((sample) => sample.measured_acceleration_mps2 * METERS_TO_FEET))
+      ]
+    },
+    {
+      id: "deployment",
+      title: "Airbrake command and deployment",
+      subtitle: "Controller request compared with the rate-limited deployment actually applied to RocketPy",
+      unit: "%",
+      includeZero: true,
+      fixedMaximum: 100,
+      times,
+      series: [
+        series("C++ command", "#b54708", log.map((sample) => sample.command_fraction * 100), { dash: [5, 4] }),
+        series("Applied deployment", "#175cd3", log.map((sample) => sample.actual_deployment_fraction * 100))
+      ]
+    }
+  ];
+}
+
+function renderFlightData() {
+  const container = el("flight-data-content");
+  const data = state.flightData;
+  const log = data?.controllerLog || [];
+  if (!data || !log.length) {
+    container.innerHTML = `
+      <section class="flight-empty">
+        <h1>No flight time history is loaded</h1>
+        <p>Run RocketPy to generate altitude, speed, acceleration, phase, command, and deployment data from the current inputs.</p>
+        <button id="run-flight-data" class="button button-primary" type="button">Run RocketPy</button>
+      </section>`;
+    el("run-flight-data").addEventListener("click", () => runSimulation("rocketpy"));
+    return;
+  }
+
+  const closed = data.closedLoop || {};
+  const transitions = data.phaseTransitions?.length ? data.phaseTransitions : deriveClientPhaseTransitions(log);
+  const maximumSpeedMps = Number(closed.maximumSpeedMps ?? finiteMaximum(log.map((sample) => Number(sample.truth_speed_mps)), 0));
+  const maximumAccelerationMps2 = Number(closed.maximumVerticalAccelerationMps2 ?? finiteMaximum(log.map((sample) => Math.abs(Number(sample.truth_acceleration_mps2))), 0));
+  const chartDefinitions = flightChartDefinitions(data);
+  const modelStatus = data.modelStatus || "Model maturity was not recorded.";
+  const limitations = data.limitations || [];
+  const integrityPass = Boolean(data.acceptance?.timeHistoryPass);
+  const inputMode = data.inputMode === "experimental-overrides" ? "Experimental input run" : "Report baseline run";
+
+  container.innerHTML = `
+    <header class="flight-data-heading">
+      <div>
+        <div class="flight-data-kicker">RocketPy + C++ closed loop</div>
+        <h1>Flight Time History</h1>
+        <p>Follow the simulated vehicle from pad through boost, controlled coast, apogee, Recovery entry, and airbrake retraction.</p>
+      </div>
+      <div class="flight-data-actions">
+        <button id="run-flight-data" class="button button-primary" type="button">Run RocketPy</button>
+        <button id="download-flight-csv" class="button button-secondary" type="button">Download CSV</button>
+        <button id="download-flight-json" class="button button-secondary" type="button">Download JSON</button>
+      </div>
+    </header>
+    <section class="model-disclosure">
+      <div><strong>${escapeHtml(inputMode)}</strong><span>${escapeHtml(modelStatus)}</span></div>
+      <span class="integrity-badge ${integrityPass ? "status-pass" : "status-fail"}">${integrityPass ? "DATA CHECK PASS" : "DATA CHECK FAIL"}</span>
+    </section>
+    <section class="flight-metrics" aria-label="Flight summary">
+      <div><span>Closed-loop apogee</span><strong>${Number(closed.apogeeFt ?? 0).toFixed(0)} ft</strong><small>${Number(closed.targetErrorFt ?? 0) >= 0 ? "+" : ""}${Number(closed.targetErrorFt ?? 0).toFixed(0)} ft from target</small></div>
+      <div><span>Maximum 3D speed</span><strong>${(maximumSpeedMps * METERS_TO_FEET).toFixed(1)} ft/s</strong><small>RocketPy truth</small></div>
+      <div><span>Peak vertical acceleration</span><strong>${(maximumAccelerationMps2 * METERS_TO_FEET).toFixed(1)} ft/s²</strong><small>Absolute net vertical value</small></div>
+      <div><span>Peak deployment</span><strong>${(Number(closed.peakDeploymentFraction ?? 0) * 100).toFixed(1)}%</strong><small>${Number(closed.finalDeploymentFraction ?? 0) <= 0.02 ? "Retracted after apogee" : "Still deployed at window end"}</small></div>
+      <div><span>Apogee time</span><strong>${Number(closed.apogeeTimeS ?? 0).toFixed(2)} s</strong><small>Observation ends at ${Number(closed.observationEndTimeS ?? log.at(-1)?.time_s ?? 0).toFixed(2)} s</small></div>
+    </section>
+    <section class="data-key">
+      <div><strong>Truth</strong><span>RocketPy trajectory and aerodynamic response.</span></div>
+      <div><strong>Sensor</strong><span>Delayed, biased, noisy, and quantized virtual measurements.</span></div>
+      <div><strong>Estimate</strong><span>Output from the repository's C++ vertical EKF.</span></div>
+    </section>
+    <section class="flight-chart-grid">
+      ${chartDefinitions.map((definition) => `
+        <article class="flight-chart-panel">
+          <header><div><h2>${escapeHtml(definition.title)}</h2><p>${escapeHtml(definition.subtitle)}</p></div><span>${escapeHtml(definition.unit)}</span></header>
+          <div class="chart-legend">${definition.series.map((item) => `<span><i style="--series-color:${item.color}"></i>${escapeHtml(item.label)}</span>`).join("")}</div>
+          <div class="chart-stage">
+            <canvas class="flight-chart-canvas" data-chart-id="${definition.id}" aria-label="${escapeHtml(definition.title)} line graph"></canvas>
+            <div class="chart-tooltip" role="status"></div>
+          </div>
+        </article>`).join("")}
+    </section>
+    <section class="phase-panel">
+      <header><h2>Flight phase timeline</h2><p>Phase names come from the real C++ flight-phase tracker, not from UI inference.</p></header>
+      <div class="phase-strip">${transitions.map((transition, index) => {
+        const endTime = transitions[index + 1]?.time_s ?? log.at(-1).time_s;
+        const duration = Math.max(0.01, endTime - transition.time_s);
+        return `<span style="--phase-color:${PHASE_COLORS[transition.phase] || "#f2f4f7"};--phase-grow:${duration}" title="${escapeHtml(transition.phase)} from ${Number(transition.time_s).toFixed(2)} s"><b>${escapeHtml(transition.phase)}</b><small>${Number(transition.time_s).toFixed(2)} s</small></span>`;
+      }).join("")}</div>
+      <div class="phase-table-wrap"><table class="phase-table"><thead><tr><th>Phase entered</th><th>Time</th><th>Altitude</th><th>Vertical velocity</th><th>Deployment</th></tr></thead><tbody>
+        ${transitions.map((transition) => `<tr><td>${escapeHtml(transition.phase)}</td><td>${Number(transition.time_s).toFixed(2)} s</td><td>${(Number(transition.altitude_m) * METERS_TO_FEET).toFixed(1)} ft</td><td>${(Number(transition.vertical_velocity_mps) * METERS_TO_FEET).toFixed(1)} ft/s</td><td>${(Number(transition.deployment_fraction) * 100).toFixed(1)}%</td></tr>`).join("")}
+      </tbody></table></div>
+    </section>
+    <section class="limitations-panel"><h2>What this run does not prove</h2>${limitations.map((limitation) => `<p>${escapeHtml(limitation)}</p>`).join("")}</section>`;
+
+  el("run-flight-data").addEventListener("click", () => runSimulation("rocketpy"));
+  el("download-flight-csv").addEventListener("click", () => downloadFlightData("csv"));
+  el("download-flight-json").addEventListener("click", () => downloadFlightData("json"));
+  requestAnimationFrame(renderFlightCharts);
+}
+
+function drawFlightChart(canvas, definition, transitions, hoverIndex = null) {
+  const width = Math.max(320, Math.floor(canvas.clientWidth));
+  const height = Math.max(230, Math.floor(canvas.clientHeight));
+  const ratio = window.devicePixelRatio || 1;
+  canvas.width = Math.floor(width * ratio);
+  canvas.height = Math.floor(height * ratio);
+  const context = canvas.getContext("2d");
+  context.setTransform(ratio, 0, 0, ratio, 0, 0);
+  context.clearRect(0, 0, width, height);
+
+  const margin = { left: 58, right: 16, top: 12, bottom: 34 };
+  const plotWidth = width - margin.left - margin.right;
+  const plotHeight = height - margin.top - margin.bottom;
+  const xMin = definition.times[0] ?? 0;
+  const xMax = definition.times.at(-1) ?? 1;
+  const finiteValues = definition.series.flatMap((item) => item.values.filter(Number.isFinite));
+  let yMin = finiteValues.length ? Math.min(...finiteValues) : 0;
+  let yMax = definition.fixedMaximum ?? (finiteValues.length ? Math.max(...finiteValues) : 1);
+  if (definition.includeZero) {
+    yMin = Math.min(0, yMin);
+    yMax = Math.max(0, yMax);
+  }
+  if (Math.abs(yMax - yMin) < 1e-9) yMax = yMin + 1;
+  const padding = (yMax - yMin) * 0.08;
+  if (definition.fixedMaximum == null) yMax += padding;
+  yMin -= padding;
+
+  const mapX = (value) => margin.left + ((value - xMin) / Math.max(1e-9, xMax - xMin)) * plotWidth;
+  const mapY = (value) => margin.top + (1 - (value - yMin) / (yMax - yMin)) * plotHeight;
+
+  transitions.forEach((transition, index) => {
+    const end = transitions[index + 1]?.time_s ?? xMax;
+    context.fillStyle = PHASE_COLORS[transition.phase] || "#f8f9fb";
+    context.fillRect(mapX(transition.time_s), margin.top, Math.max(1, mapX(end) - mapX(transition.time_s)), plotHeight);
+  });
+
+  context.font = "10px Segoe UI, sans-serif";
+  context.fillStyle = "#667085";
+  context.strokeStyle = "#dfe4ec";
+  context.lineWidth = 1;
+  for (let tick = 0; tick <= 4; tick += 1) {
+    const fraction = tick / 4;
+    const y = margin.top + fraction * plotHeight;
+    const value = yMax - fraction * (yMax - yMin);
+    context.beginPath();
+    context.moveTo(margin.left, y);
+    context.lineTo(width - margin.right, y);
+    context.stroke();
+    context.textAlign = "right";
+    context.textBaseline = "middle";
+    context.fillText(value.toFixed(Math.abs(value) >= 100 ? 0 : 1), margin.left - 7, y);
+  }
+  for (let tick = 0; tick <= 5; tick += 1) {
+    const fraction = tick / 5;
+    const x = margin.left + fraction * plotWidth;
+    const value = xMin + fraction * (xMax - xMin);
+    context.beginPath();
+    context.moveTo(x, margin.top);
+    context.lineTo(x, margin.top + plotHeight);
+    context.stroke();
+    context.textAlign = "center";
+    context.textBaseline = "top";
+    context.fillText(`${value.toFixed(1)} s`, x, margin.top + plotHeight + 8);
+  }
+
+  definition.series.forEach((item) => {
+    context.strokeStyle = item.color;
+    context.fillStyle = item.color;
+    context.lineWidth = item.pointsOnly ? 1 : 1.8;
+    context.setLineDash(item.dash || []);
+    if (item.pointsOnly) {
+      item.values.forEach((value, index) => {
+        if (!Number.isFinite(value)) return;
+        context.beginPath();
+        context.arc(mapX(definition.times[index]), mapY(value), 1.4, 0, Math.PI * 2);
+        context.fill();
+      });
+      return;
+    }
+    context.beginPath();
+    let drawing = false;
+    item.values.forEach((value, index) => {
+      if (!Number.isFinite(value)) {
+        drawing = false;
+        return;
+      }
+      const x = mapX(definition.times[index]);
+      const y = mapY(value);
+      if (!drawing) context.moveTo(x, y);
+      else context.lineTo(x, y);
+      drawing = true;
+    });
+    context.stroke();
+  });
+  context.setLineDash([]);
+
+  if (hoverIndex != null && definition.times[hoverIndex] != null) {
+    const x = mapX(definition.times[hoverIndex]);
+    context.strokeStyle = "#344054";
+    context.lineWidth = 1;
+    context.beginPath();
+    context.moveTo(x, margin.top);
+    context.lineTo(x, margin.top + plotHeight);
+    context.stroke();
+    definition.series.forEach((item) => {
+      const value = item.values[hoverIndex];
+      if (!Number.isFinite(value)) return;
+      context.fillStyle = item.color;
+      context.beginPath();
+      context.arc(x, mapY(value), 3, 0, Math.PI * 2);
+      context.fill();
+    });
+  }
+  canvas._flightPlot = { definition, transitions, margin, plotWidth, xMin, xMax };
+}
+
+function nearestTimeIndex(times, target) {
+  let low = 0;
+  let high = times.length - 1;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (times[middle] < target) low = middle + 1;
+    else high = middle;
+  }
+  if (low > 0 && Math.abs(times[low - 1] - target) < Math.abs(times[low] - target)) return low - 1;
+  return low;
+}
+
+function renderFlightCharts() {
+  if (state.activeView !== "flightdata" || !state.flightData?.controllerLog?.length) return;
+  const transitions = state.flightData.phaseTransitions?.length
+    ? state.flightData.phaseTransitions
+    : deriveClientPhaseTransitions(state.flightData.controllerLog);
+  const definitions = flightChartDefinitions(state.flightData);
+  definitions.forEach((definition) => {
+    const canvas = document.querySelector(`[data-chart-id="${definition.id}"]`);
+    if (!canvas) return;
+    const tooltip = canvas.parentElement.querySelector(".chart-tooltip");
+    drawFlightChart(canvas, definition, transitions);
+    canvas.addEventListener("mousemove", (event) => {
+      const bounds = canvas.getBoundingClientRect();
+      const plot = canvas._flightPlot;
+      const relative = Math.max(0, Math.min(1, (event.clientX - bounds.left - plot.margin.left) / plot.plotWidth));
+      const targetTime = plot.xMin + relative * (plot.xMax - plot.xMin);
+      const index = nearestTimeIndex(definition.times, targetTime);
+      drawFlightChart(canvas, definition, transitions, index);
+      const phase = state.flightData.controllerLog[index]?.phase || "Unknown";
+      const values = definition.series
+        .filter((item) => Number.isFinite(item.values[index]))
+        .map((item) => `<span><i style="--series-color:${item.color}"></i>${escapeHtml(item.label)}: <b>${Number(item.values[index]).toFixed(1)} ${escapeHtml(definition.unit)}</b></span>`)
+        .join("");
+      tooltip.innerHTML = `<strong>${definition.times[index].toFixed(2)} s · ${escapeHtml(phase)}</strong>${values}`;
+      tooltip.style.left = `${Math.max(8, Math.min(bounds.width - 220, event.clientX - bounds.left + 12))}px`;
+      tooltip.style.top = `${Math.max(8, event.clientY - bounds.top - 12)}px`;
+      tooltip.classList.add("visible");
+    });
+    canvas.addEventListener("mouseleave", () => {
+      tooltip.classList.remove("visible");
+      drawFlightChart(canvas, definition, transitions);
+    });
+  });
+}
+
+function downloadFlightData(format) {
+  const data = state.flightData;
+  if (!data?.controllerLog?.length) return;
+  let body;
+  let type;
+  let extension;
+  if (format === "csv") {
+    const fields = Object.keys(data.controllerLog[0]);
+    const rows = data.controllerLog.map((sample) => fields.map((field) => {
+      const value = sample[field];
+      if (value == null) return "";
+      const textValue = String(value);
+      return /[",\n]/.test(textValue) ? `"${textValue.replaceAll('"', '""')}"` : textValue;
+    }).join(","));
+    body = [fields.join(","), ...rows].join("\n");
+    type = "text/csv";
+    extension = "csv";
+  } else {
+    body = JSON.stringify(data, null, 2);
+    type = "application/json";
+    extension = "json";
+  }
+  const url = URL.createObjectURL(new Blob([body], { type }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `ambar-flight-data.${extension}`;
+  link.click();
+  URL.revokeObjectURL(url);
 }
 
 function inputIsModified(fieldId) {
@@ -377,14 +757,14 @@ function renderSources() {
         ["June 14 M5 report", "3379 ft passive apogee, 579 ft/s maximum velocity, 75.5 ft/s rail exit, launch conditions, fin geometry, airbrake loads, and 430 mA logic budget", "EXTRACTED", "status-pass"],
         ["M5 project requirements", "3000 ft target, ±100 ft tolerance, 2.4 GHz radio, J420R motor selection, and separate recovery GPS", "IN CODE", "status-pass"],
         ["KiCad hardware map", "STM32H562, BMP388, LSM6DSV32X, LIS2MDL, SX1280, W25Q64, TMC5240", "LOCAL SOURCE", "status-pass"],
-        ["RocketPy physics", "RocketPy 1.12.1, certified J420R thrust curve, standard atmosphere, and real C++ controller bridge", "IN CODE", "status-pass"],
+        ["RocketPy physics", "RocketPy 1.12.1, certified J420R thrust curve, standard pressure/temperature, constant M5 wind, provisional sensor errors, and real C++ controller bridge", "IN CODE", "status-pass"],
         ["Sensor architecture", "Airbrake board uses magnetometer; recovery/tracking GPS is an independent subsystem", "VERIFIED", "status-pass"]
       ]
     },
     {
       title: "Open engineering inputs",
       rows: [
-        ["OpenRocket reconstruction", "Current .ork, mass properties, component positions, and drag curves are needed to resolve 3955 ft versus 3379 ft", "FAILING", "status-warn"],
+        ["OpenRocket reconstruction", "The current .ork geometry is applied, but the selected configuration must be rerun and measured mass properties/drag are needed to resolve 3851 ft versus 3379 ft", "FAILING", "status-warn"],
         ["Aerodynamic calibration", "Drag versus Mach/deployment with a declared reference area", "PROVISIONAL", "status-warn"],
         ["Mass properties", "Measured flight-ready mass, center of gravity, and inertia", "PLACEHOLDER", "status-warn"],
         ["Actuator calibration", "Final step/mm, current limit, homing switch, friction, and stall threshold", "PLACEHOLDER", "status-warn"],
@@ -418,7 +798,7 @@ function renderRunMeta() {
   status.textContent = statusText;
   status.className = `status-inline ${statusClassName}`;
   el("run-all").disabled = state.running;
-  el("run-suite").disabled = state.running || state.activeView === "overview" || state.activeView === "sources" || state.activeView === "inputs";
+  el("run-suite").disabled = state.running || state.activeView === "overview" || state.activeView === "sources" || state.activeView === "inputs" || state.activeView === "flightdata";
 }
 
 function formatDate(value) {
@@ -463,12 +843,13 @@ async function runSimulation(suite = "all", startedFromInputs = false) {
     }
     state.inputMode = payload.inputMode || "report-baseline";
     if (payload.appliedInputs) state.inputValues = structuredClone(payload.appliedInputs);
+    if (payload.flightData) state.flightData = payload.flightData;
     state.runStatus = payload.exitCode === 0 ? "ready" : "failed";
     if (startedFromInputs) {
-      state.activeView = "rocketpy";
+      state.activeView = "flightdata";
       state.selectedSuite = "rocketpy";
       state.selectedScenarioIndex = 0;
-      state.inspectorOpen = true;
+      state.inspectorOpen = false;
     }
     showToast(payload.exitCode === 0
       ? `${suite === "all" ? "All suites" : SUITE_META[suite].label} completed successfully.`
@@ -502,6 +883,7 @@ async function hydrateLastRun() {
     }
     state.inputMode = payload.inputMode || "report-baseline";
     if (payload.appliedInputs) state.inputValues = structuredClone(payload.appliedInputs);
+    if (payload.flightData) state.flightData = payload.flightData;
     state.runStatus = payload.exitCode === 0 ? "ready" : "failed";
     render();
   } catch {
@@ -623,6 +1005,8 @@ function setupEvents() {
       state.selectedSuite = state.activeView;
       state.selectedScenarioIndex = 0;
       state.inspectorOpen = true;
+    } else if (state.activeView === "flightdata") {
+      state.inspectorOpen = false;
     }
     render();
   });
@@ -643,6 +1027,12 @@ function setupEvents() {
     URL.revokeObjectURL(url);
   });
   el("clear-output").addEventListener("click", () => { state.data.raw = ""; renderConsole(); });
+  let resizeFrame = null;
+  window.addEventListener("resize", () => {
+    if (state.activeView !== "flightdata") return;
+    cancelAnimationFrame(resizeFrame);
+    resizeFrame = requestAnimationFrame(renderFlightCharts);
+  });
 }
 
 setupEvents();

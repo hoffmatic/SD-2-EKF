@@ -369,6 +369,66 @@ h1 { font-size: 18px; line-height: 24px; margin-bottom: 2px; }
 .input-state { color: var(--text-muted); font-size: 9px; font-weight: 700; text-align: right; text-transform: uppercase; }
 .input-row.modified .input-state { color: var(--blue); }
 
+.flight-data-content { display: grid; gap: 14px; max-width: 1500px; margin: 0 auto; }
+.flight-data-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
+.flight-data-heading h1 { margin-bottom: 3px; }
+.flight-data-heading p { max-width: 760px; margin-bottom: 0; color: var(--text-muted); font-size: 12px; line-height: 18px; }
+.flight-data-kicker { color: var(--blue); font-size: 10px; font-weight: 750; text-transform: uppercase; }
+.flight-data-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.flight-empty { padding: 56px 20px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--white); text-align: center; }
+.flight-empty p { max-width: 620px; margin: 0 auto 18px; color: var(--text-muted); font-size: 12px; line-height: 18px; }
+
+.model-disclosure { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 10px 12px; border: 1px solid #f4d48a; border-left: 4px solid var(--amber); border-radius: var(--radius); background: var(--amber-soft); }
+.model-disclosure > div { display: grid; gap: 2px; min-width: 0; }
+.model-disclosure strong { font-size: 11px; }
+.model-disclosure span { color: #694b10; font-size: 10px; line-height: 15px; }
+.integrity-badge { flex: 0 0 auto; padding: 4px 7px; border: 1px solid currentColor; border-radius: 4px; background: var(--white); font-size: 9px !important; font-weight: 800; }
+
+.flight-metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border: 1px solid var(--border); border-radius: var(--radius); background: var(--white); }
+.flight-metrics div { display: grid; gap: 2px; min-width: 0; padding: 11px 13px; border-right: 1px solid var(--border); }
+.flight-metrics div:last-child { border-right: 0; }
+.flight-metrics span, .flight-metrics small { color: var(--text-muted); font-size: 9px; line-height: 13px; }
+.flight-metrics strong { font-size: 16px; line-height: 21px; }
+
+.data-key { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--border); }
+.data-key div { display: grid; gap: 2px; padding: 9px 12px; background: var(--surface-subtle); }
+.data-key strong { font-size: 10px; }
+.data-key span { color: var(--text-muted); font-size: 10px; line-height: 15px; }
+
+.flight-chart-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.flight-chart-panel { min-width: 0; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--white); }
+.flight-chart-panel > header { min-height: 62px; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 11px 13px 8px; border-bottom: 1px solid var(--border); }
+.flight-chart-panel h2 { margin-bottom: 2px; font-size: 13px; line-height: 18px; }
+.flight-chart-panel header p { max-width: 560px; margin-bottom: 0; color: var(--text-muted); font-size: 9px; line-height: 14px; }
+.flight-chart-panel header > span { flex: 0 0 auto; color: var(--text-muted); font-size: 9px; font-weight: 700; }
+.chart-legend { min-height: 35px; display: flex; align-items: center; flex-wrap: wrap; gap: 5px 14px; padding: 6px 13px; border-bottom: 1px solid #e8ecf2; color: #475467; font-size: 9px; }
+.chart-legend span, .chart-tooltip span { display: inline-flex; align-items: center; gap: 5px; }
+.chart-legend i, .chart-tooltip i { width: 12px; height: 3px; flex: 0 0 auto; background: var(--series-color); }
+.chart-stage { position: relative; min-width: 0; }
+.flight-chart-canvas { display: block; width: 100%; height: 280px; cursor: crosshair; }
+.chart-tooltip { position: absolute; z-index: 4; display: none; width: 208px; padding: 8px 9px; border: 1px solid #98a2b3; border-radius: 4px; background: rgba(255, 255, 255, 0.97); box-shadow: var(--shadow); pointer-events: none; color: #344054; font-size: 9px; line-height: 14px; }
+.chart-tooltip.visible { display: grid; gap: 3px; }
+.chart-tooltip > strong { font-size: 10px; }
+.chart-tooltip span { justify-content: space-between; }
+
+.phase-panel, .limitations-panel { overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--white); }
+.phase-panel > header { padding: 11px 13px; border-bottom: 1px solid var(--border); background: var(--surface-subtle); }
+.phase-panel h2, .limitations-panel h2 { margin-bottom: 2px; font-size: 13px; }
+.phase-panel header p { margin-bottom: 0; color: var(--text-muted); font-size: 10px; }
+.phase-strip { display: flex; min-height: 52px; border-bottom: 1px solid var(--border); }
+.phase-strip span { min-width: 75px; flex-grow: var(--phase-grow); display: grid; align-content: center; gap: 2px; padding: 7px 10px; border-right: 1px solid rgba(102, 112, 133, 0.22); background: var(--phase-color); }
+.phase-strip span:last-child { border-right: 0; }
+.phase-strip b { font-size: 10px; }
+.phase-strip small { color: var(--text-muted); font-size: 9px; }
+.phase-table-wrap { overflow-x: auto; }
+.phase-table { width: 100%; min-width: 620px; border-collapse: collapse; }
+.phase-table th, .phase-table td { padding: 7px 10px; border-bottom: 1px solid #e8ecf2; font-size: 10px; text-align: left; }
+.phase-table th { color: var(--text-muted); font-size: 9px; font-weight: 650; }
+.phase-table tr:last-child td { border-bottom: 0; }
+.limitations-panel { padding: 12px 14px; border-left: 4px solid var(--amber); }
+.limitations-panel p { position: relative; margin: 7px 0 0; padding-left: 13px; color: #475467; font-size: 10px; line-height: 16px; }
+.limitations-panel p::before { content: ""; position: absolute; left: 0; top: 6px; width: 5px; height: 5px; border-radius: 50%; background: var(--amber); }
+
 .console-panel {
   grid-area: console;
   z-index: 6;
@@ -424,6 +484,9 @@ h1 { font-size: 18px; line-height: 24px; margin-bottom: 2px; }
   .nav-item { justify-content: center; padding: 0; border-left: 0; border-bottom: 3px solid transparent; border-radius: 5px; }
   .nav-item.selected { border-left-color: transparent; border-bottom-color: var(--blue); }
   .nav-icon { width: auto; }
+  .flight-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .flight-metrics div:nth-child(3) { border-right: 0; }
+  .flight-metrics div:nth-child(-n+3) { border-bottom: 1px solid var(--border); }
 }
 
 @media (max-width: 900px) {
@@ -452,6 +515,14 @@ h1 { font-size: 18px; line-height: 24px; margin-bottom: 2px; }
   .summary-metric { border-right: 0; border-bottom: 1px solid var(--border); }
   .summary-metric:last-child { border-bottom: 0; }
   .input-groups { grid-template-columns: 1fr; }
+  .flight-data-heading { display: grid; }
+  .flight-data-actions { justify-content: flex-start; }
+  .flight-chart-grid { grid-template-columns: 1fr; }
+  .data-key { grid-template-columns: 1fr; }
+  .flight-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .flight-metrics div { border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+  .flight-metrics div:nth-child(2n) { border-right: 0; }
+  .flight-metrics div:last-child { border-bottom: 0; }
 }
 
 @media (max-width: 640px) {
@@ -474,6 +545,15 @@ h1 { font-size: 18px; line-height: 24px; margin-bottom: 2px; }
   .criteria-strip div:last-child { border-bottom: 0; }
   .input-row { grid-template-columns: minmax(0, 1fr) 128px; gap: 8px; }
   .input-state { grid-column: 1 / -1; text-align: left; }
+  .flight-data-actions { width: 100%; }
+  .flight-data-actions .button { flex: 1 1 120px; }
+  .model-disclosure { align-items: flex-start; flex-direction: column; }
+  .flight-metrics { grid-template-columns: 1fr; }
+  .flight-metrics div, .flight-metrics div:nth-child(2n), .flight-metrics div:nth-child(3) { border-right: 0; border-bottom: 1px solid var(--border); }
+  .flight-metrics div:last-child { border-bottom: 0; }
+  .flight-chart-canvas { height: 245px; }
+  .phase-strip { overflow-x: auto; }
+  .phase-strip span { flex: 0 0 112px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

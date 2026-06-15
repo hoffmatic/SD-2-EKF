@@ -33,6 +33,7 @@ LAST_RUN_PATH = BUILD_ROOT / "ui-last-run.json"
 SERVER_INFO_PATH = BUILD_ROOT / "ui-server.json"
 BASE_CONFIG_PATH = REPO_ROOT / "sim" / "rocketpy" / "ambar_reference_config.json"
 UI_OVERRIDES_PATH = BUILD_ROOT / "ui-rocketpy-overrides.json"
+ROCKETPY_RESULT_PATH = BUILD_ROOT / "rocketpy-last-run.json"
 
 FEET_TO_METERS = 0.3048
 POUNDS_TO_KG = 0.45359237
@@ -74,6 +75,8 @@ INPUT_SPECS = [
     field_spec("railLengthFt", "Rail length", "Launch", "ft", 4, 30, 0.25, ("environment", "rail_length_m"), "M5 report", lambda value: value * FEET_TO_METERS, lambda value: value / FEET_TO_METERS),
     field_spec("launchAngleFromVerticalDeg", "Angle from vertical", "Launch", "deg", 0, 20, 0.5, ("environment", "inclination_deg"), "Launch setting", lambda value: 90.0 - value, lambda value: 90.0 - value),
     field_spec("headingDeg", "Heading", "Launch", "deg", 0, 360, 1, ("environment", "heading_deg"), "M5 report"),
+    field_spec("windSpeedMps", "Constant wind speed", "Launch", "m/s", 0, 30, 0.1, ("environment", "wind_speed_mps"), "M5 report"),
+    field_spec("windFromDirectionDeg", "Wind direction from", "Launch", "deg", 0, 360, 1, ("environment", "wind_from_direction_deg"), "M5 report"),
     field_spec("dryMassLb", "Dry mass", "Vehicle", "lb", 1, 50, 0.1, ("rocket", "dry_mass_kg"), "Placeholder", lambda value: value * POUNDS_TO_KG, lambda value: value / POUNDS_TO_KG),
     field_spec("powerOnDragCoefficient", "Power-on drag coefficient", "Vehicle", "Cd", 0.05, 2.5, 0.01, ("rocket", "power_on_drag_coefficient"), "Placeholder"),
     field_spec("powerOffDragCoefficient", "Power-off drag coefficient", "Vehicle", "Cd", 0.05, 2.5, 0.01, ("rocket", "power_off_drag_coefficient"), "Placeholder"),
@@ -86,7 +89,11 @@ INPUT_SPECS = [
     field_spec("fullDeploymentDragCoefficient", "Full-deployment drag increment", "Airbrake", "Cd", 0, 3, 0.01, ("airbrakes", "drag_coefficient_at_full_deployment"), "Placeholder"),
     field_spec("controllerRateHz", "Controller rate", "Sensors", "Hz", 10, 1000, 10, ("airbrakes", "sampling_rate_hz"), "Model setting"),
     field_spec("barometerRateHz", "Barometer rate", "Sensors", "Hz", 1, 200, 1, ("airbrakes", "barometer_rate_hz"), "Model setting"),
-    field_spec("barometerStdDevFt", "Barometer standard deviation", "Sensors", "ft", 0.01, 100, 0.1, ("airbrakes", "barometer_std_dev_m"), "Placeholder", lambda value: value * FEET_TO_METERS, lambda value: value / FEET_TO_METERS),
+    field_spec("accelerometerBiasMps2", "Accelerometer bias", "Sensors", "m/s^2", -10, 10, 0.05, ("sensor_model", "accelerometer_bias_mps2"), "Provisional"),
+    field_spec("accelerometerNoiseMps2", "Accelerometer noise standard deviation", "Sensors", "m/s^2", 0, 20, 0.05, ("sensor_model", "accelerometer_noise_std_dev_mps2"), "Provisional"),
+    field_spec("barometerBiasFt", "Barometer bias", "Sensors", "ft", -100, 100, 0.1, ("sensor_model", "barometer_bias_m"), "Provisional", lambda value: value * FEET_TO_METERS, lambda value: value / FEET_TO_METERS),
+    field_spec("barometerStdDevFt", "Barometer noise standard deviation", "Sensors", "ft", 0.01, 100, 0.1, ("sensor_model", "barometer_noise_std_dev_m"), "Provisional", lambda value: value * FEET_TO_METERS, lambda value: value / FEET_TO_METERS),
+    field_spec("sensorLatencyMs", "Sensor latency", "Sensors", "ms", 0, 500, 1, ("sensor_model", "latency_s"), "Provisional", lambda value: value / 1000.0, lambda value: value * 1000.0),
 ]
 
 SUITE_EXECUTABLES = {
@@ -122,6 +129,17 @@ def baseline_inputs() -> dict[str, float | int]:
 def public_input_schema() -> list[dict]:
     private_keys = {"path", "to_config", "from_config", "integer"}
     return [{key: value for key, value in spec.items() if key not in private_keys} for spec in INPUT_SPECS]
+
+
+def load_rocketpy_result() -> dict | None:
+    """Load the structured flight log produced by the RocketPy adapter."""
+    if not ROCKETPY_RESULT_PATH.exists():
+        return None
+    try:
+        result = json.loads(ROCKETPY_RESULT_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return result if isinstance(result, dict) else None
 
 
 def validate_inputs(requested: object) -> tuple[dict[str, float | int], dict]:
@@ -246,7 +264,9 @@ class SimulationHandler(SimpleHTTPRequestHandler):
         if self.path == "/api/last-run":
             if LAST_RUN_PATH.exists():
                 try:
-                    self.send_json(json.loads(LAST_RUN_PATH.read_text(encoding="utf-8")))
+                    payload = json.loads(LAST_RUN_PATH.read_text(encoding="utf-8"))
+                    payload["flightData"] = load_rocketpy_result()
+                    self.send_json(payload)
                 except (OSError, json.JSONDecodeError):
                     self.send_json({"lastRun": None})
             else:
@@ -312,6 +332,7 @@ class SimulationHandler(SimpleHTTPRequestHandler):
                 "output": output,
                 "inputMode": input_mode,
                 "appliedInputs": normalized_inputs,
+                "flightData": load_rocketpy_result() if suite in ("all", "rocketpy") else None,
             }
             BUILD_ROOT.mkdir(parents=True, exist_ok=True)
             LAST_RUN_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
