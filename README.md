@@ -46,6 +46,8 @@ Before use in flight hardware, add:
 - TMC5240 motor driver limits, current monitoring, and fail-safe behavior
 - Hardware-in-the-loop tests and recorded hardware-log replay
 - Telemetry packet definitions for estimate, phase, command, and health
+- STM32CubeIDE firmware for the first bench-gated airbrake PCB integration
+  under `firmware/stm32_airbrake_pcb`
 
 ## Build
 
@@ -171,6 +173,9 @@ flow, file dependency map, and the intended use case for each executable.
   what each simulation proves, current gaps, and recommended next simulations.
 - [docs/m5_report_change_guide.md](docs/m5_report_change_guide.md):
   section-by-section advice for manually correcting the Word report.
+- [firmware/stm32_airbrake_pcb](firmware/stm32_airbrake_pcb): STM32CubeIDE
+  project copy for the Airbrake PCB, including the C EKF port, flash logging,
+  radio command parsing, telemetry additions, and bench-gated actuator layer.
 
 Older V2 screenshot notes and outdated BOM mismatch notes were removed from the
 live repo so GitHub only presents the current working baseline.
