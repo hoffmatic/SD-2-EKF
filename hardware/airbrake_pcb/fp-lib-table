@@ -1,0 +1,13 @@
+(fp_lib_table
+	(version 7)
+	(lib (name "BMP388") (type "KiCad") (uri "${KIPRJMOD}/components/ul_BMP388/KiCADv6/footprints.pretty") (options "") (descr ""))
+	(lib (name "ESDA7P60-1U1M") (type "KiCad") (uri "${KIPRJMOD}/components/ul_ESDA7P60-1U1M/KiCADv6/footprints.pretty") (options "") (descr ""))
+	(lib (name "IRLML6344TRPBF") (type "KiCad") (uri "${KIPRJMOD}/components/ul_IRLML6344TRPBF/KiCADv6/footprints.pretty") (options "") (descr ""))
+	(lib (name "LIS2MDLTR") (type "KiCad") (uri "${KIPRJMOD}/components/ul_LIS2MDLTR/KiCADv6/footprints.pretty") (options "") (descr ""))
+	(lib (name "LSM6DSV32XTR") (type "KiCad") (uri "${KIPRJMOD}/components/ul_LSM6DSV32XTR/KiCADv6/footprints.pretty") (options "") (descr ""))
+	(lib (name "MPM3606AGQV-Z") (type "KiCad") (uri "${KIPRJMOD}/components/ul_MPM3606AGQV-Z/KiCADv6/footprints.pretty") (options "") (descr ""))
+	(lib (name "STM32H562RGT6") (type "KiCad") (uri "${KIPRJMOD}/components/ul_STM32H562RGT6/KiCADv6/footprints.pretty") (options "") (descr ""))
+	(lib (name "SX1280IMLTRT") (type "KiCad") (uri "${KIPRJMOD}/components/ul_SX1280IMLTRT/KiCADv6/footprints.pretty") (options "") (descr ""))
+	(lib (name "TMC5240ATJ-T") (type "KiCad") (uri "${KIPRJMOD}/components/ul_TMC5240ATJ-T/KiCADv6/footprints.pretty") (options "") (descr ""))
+	(lib (name "W25Q64JVSSIQ") (type "KiCad") (uri "${KIPRJMOD}/components/ul_W25Q64JVSSIQ/KiCADv6/footprints.pretty") (options "") (descr ""))
+)
