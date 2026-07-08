@@ -184,6 +184,8 @@ flow, file dependency map, and the intended use case for each executable.
   standalone Rust controller reference copied from the local PCB folder.
 - [tools/arduino_ide_shortcut](tools/arduino_ide_shortcut): readable extraction
   of the local Arduino IDE shortcut metadata.
+- [tools/arduino_ground_receiver](tools/arduino_ground_receiver): Arduino/LILYGO
+  SX1280 receiver sketch that decodes the STM32 binary EKF telemetry packets.
 
 Older V2 screenshot notes and outdated BOM mismatch notes were removed from the
 live repo so GitHub only presents the current working baseline.
