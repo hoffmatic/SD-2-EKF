@@ -1,44 +1,42 @@
 /*
- * PROJECT FILE OVERVIEW
- * Comment made: 2026-07-07 17:44:48 -04:00
+ * AMBAR VERTICAL EXTENDED KALMAN FILTER - IMPLEMENTATION
  *
- * What this file does:
- *   This file contains the vertical EKF math in plain C. It avoids heap allocation and external matrix libraries so the STM32 memory use stays predictable.
+ * Purpose
+ *   Estimates pad-relative altitude, upward velocity, accelerometer bias, and
+ *   barometer-altitude bias.  It is deliberately a small, deterministic
+ *   four-state filter with fixed-size matrices and no heap allocation.
  *
- * Process flow:
- *   Reset starts at zero altitude and speed on the pad. IMU updates predict motion. Barometer updates correct altitude if pressure data looks reasonable. Bad timestamps, invalid numbers, and pressure spikes are rejected.
+ * Data flow
+ *   RocketSensors supplies pad-zeroed vertical acceleration in SI units.
+ *   AmbarEkf_PropagateImu() advances state and covariance at the IMU rate;
+ *   AmbarEkf_UpdateBarometer() applies the slower pressure-altitude correction.
+ *   AmbarFlight reads copy-out estimate and health snapshots, then owns phase,
+ *   drag prediction, and deployment decisions.  See CODE_GUIDE.md [ARCH-2]
+ *   and [ARCH-4].
  *
- * Main variables and what can be changed:
- *   State indexes should not be changed casually. Default tuning values, especially noise, covariance, and barometer gate settings, are expected to change after real testing.
+ * Section map
+ *   1. State ordering and fixed-size matrix helpers
+ *   2. Default tuning and lifecycle
+ *   3. IMU prediction
+ *   4. Barometer correction
+ *   5. Read-only estimate and health snapshots
  *
- * Assumptions:
- *   Up is positive. Input acceleration is in meters per second squared and has been zeroed on the pad by rocket_sensors.c.
- *
- * What is missing:
- *   There is no drag-aware apogee predictor, attitude correction, or host replay comparison test in this firmware folder yet.
+ * Safety and assumptions
+ *   Positive is upward; acceleration must already be aligned to the rocket
+ *   vertical axis with the stationary pad value removed.  Invalid numbers,
+ *   implausible sample intervals, and gated barometer innovations are rejected.
+ *   The default covariance/noise values are first-pass replay settings and need
+ *   validation from real sensor logs.  This module is vertical-only: it does
+ *   not estimate attitude, wind, horizontal motion, or aerodynamic drag.
  */
 
 #include "ambar_ekf.h"
 
-/*
- * ===================== AMBAR EKF PCB INTEGRATION - NEW FILE =====================
- *
- * This file is the embedded C port of the desktop SD-2-EKF vertical estimator.
- * It keeps the exact estimator responsibilities narrow:
- *   - propagate altitude and vertical velocity from high-rate IMU acceleration,
- *   - estimate slow accelerometer and barometer bias terms,
- *   - correct altitude using lower-rate barometer altitude,
- *   - reject impossible timestamps, NaN/Inf inputs, and barometer spikes,
- *   - expose health counters for telemetry and bench testing.
- *
- * The matrix math is hand-written for fixed 4x4 matrices. That is deliberate:
- * the STM32 target does not need a generic math dependency, and fixed arrays
- * make RAM use obvious during safety review.
- */
-
 #include <math.h>
 #include <stddef.h>
 #include <string.h>
+
+/* ===================== STATE MODEL AND MATRIX HELPERS ===================== */
 
 enum
 {
@@ -174,6 +172,8 @@ static void ambar_symmetrize_covariance(AmbarEkf_t *ekf)
     }
 }
 
+/* ===================== CONFIGURATION AND LIFECYCLE ===================== */
+
 AmbarEkfConfig_t AmbarEkf_DefaultConfig(void)
 {
     /*
@@ -241,6 +241,8 @@ void AmbarEkf_ResetOnPad(AmbarEkf_t *ekf, float timestamp_s)
     ekf->last_barometer_innovation_m = 0.0f;
     ekf->last_barometer_innovation_sigma = 0.0f;
 }
+
+/* ===================== IMU PREDICTION ===================== */
 
 bool AmbarEkf_PropagateImu(AmbarEkf_t *ekf,
                            float timestamp_s,
@@ -352,6 +354,8 @@ bool AmbarEkf_PropagateImu(AmbarEkf_t *ekf,
     ekf->healthy = true;
     return true;
 }
+
+/* ===================== BAROMETER CORRECTION ===================== */
 
 bool AmbarEkf_UpdateBarometer(AmbarEkf_t *ekf,
                               float barometer_altitude_agl_m,
@@ -466,6 +470,8 @@ bool AmbarEkf_UpdateBarometer(AmbarEkf_t *ekf,
 
     return true;
 }
+
+/* ===================== READ-ONLY OUTPUT SNAPSHOTS ===================== */
 
 AmbarNavigationEstimate_t AmbarEkf_GetEstimate(const AmbarEkf_t *ekf)
 {

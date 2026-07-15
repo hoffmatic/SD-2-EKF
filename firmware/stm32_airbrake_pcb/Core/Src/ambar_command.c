@@ -1,21 +1,11 @@
-/*
- * PROJECT FILE OVERVIEW
- * Comment made: 2026-07-07 18:31:46 -04:00
+/**
+ * @file ambar_command.c
+ * @brief Bounded implementation of the legacy ASCII command parser.
  *
- * What this file does:
- *   This file parses simple ASCII radio commands such as ARM, DISARM, PAD_RESET, HOME, BENCH_MOVE, and SET_CONFIG.
- *
- * Process flow:
- *   The packet is copied into a small local buffer, whitespace is trimmed, the first word selects the command, and optional arguments are converted into a float, integer, or config key.
- *
- * Main variables and what can be changed:
- *   AMBAR_COMMAND_RESPONSE_LEN controls response text size. New command names should be added to AmbarCommandAction_t and AmbarCommand_ProcessPacket together.
- *
- * Assumptions:
- *   This is a bench command parser, not a secure flight command system. The app still applies safety gates before changing anything dangerous.
- *
- * What is missing:
- *   There is no binary protocol, authentication, command timeout, or packet sequence checking yet.
+ * The file is organized as: parser limits -> normalization/conversion helpers
+ * -> public packet parser -> action-name formatter.  Helpers deliberately have
+ * no module state, which makes one packet independent of every previous packet.
+ * See ambar_command.h and CODE_GUIDE.md [ARCH-6].
  */
 
 #include "ambar_command.h"
@@ -25,8 +15,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* -------------------------------------------------------------------------- */
+/* Parser limits and private normalization helpers                            */
+/* -------------------------------------------------------------------------- */
+
+/** Largest accepted radio packet before the local NUL terminator is added. */
 #define AMBAR_COMMAND_MAX_PACKET_LEN 120U
 
+/** Reset every result field so failure paths cannot leak a prior command. */
 static void ambar_command_clear(AmbarCommandResult_t *result)
 {
     if (result != NULL)
@@ -38,6 +34,7 @@ static void ambar_command_clear(AmbarCommandResult_t *result)
     }
 }
 
+/** Trim leading/trailing ASCII whitespace in place and return the first token. */
 static char *ambar_trim(char *text)
 {
     char *end;
@@ -57,6 +54,7 @@ static char *ambar_trim(char *text)
     return text;
 }
 
+/** Normalize a NUL-terminated token for case-insensitive command matching. */
 static void ambar_uppercase(char *text)
 {
     while (*text != '\0')
@@ -66,6 +64,7 @@ static void ambar_uppercase(char *text)
     }
 }
 
+/** Parse one float token; range validation belongs to the config layer. */
 static bool ambar_parse_float(const char *text, float *value)
 {
     char *end = NULL;
@@ -86,6 +85,7 @@ static bool ambar_parse_float(const char *text, float *value)
     return true;
 }
 
+/** Parse a decimal signed step value used by BENCH_MOVE. */
 static bool ambar_parse_int32(const char *text, int32_t *value)
 {
     char *end = NULL;
@@ -106,6 +106,7 @@ static bool ambar_parse_int32(const char *text, int32_t *value)
     return true;
 }
 
+/** Populate the common successful ACK fields for a recognized command. */
 static HAL_StatusTypeDef ambar_command_finish(AmbarCommandResult_t *result,
                                               AmbarCommandAction_t action,
                                               const char *response)
@@ -119,6 +120,10 @@ static HAL_StatusTypeDef ambar_command_finish(AmbarCommandResult_t *result,
                    response != NULL ? response : AmbarCommand_ActionName(action));
     return HAL_OK;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Public parser API                                                          */
+/* -------------------------------------------------------------------------- */
 
 HAL_StatusTypeDef AmbarCommand_ProcessPacket(const uint8_t *packet,
                                              uint8_t length,
@@ -154,6 +159,7 @@ HAL_StatusTypeDef AmbarCommand_ProcessPacket(const uint8_t *packet,
     memcpy(buffer, packet, length);
     buffer[length] = '\0';
 
+    /* At most three fields are accepted: COMMAND [KEY_OR_STEPS] [VALUE]. */
     char *trimmed = ambar_trim(buffer);
     field_count = sscanf(trimmed, "%23s %23s %31s", command, arg1, arg2);
     if (field_count <= 0)

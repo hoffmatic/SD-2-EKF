@@ -481,27 +481,21 @@ void HAL_SPI_MspDeInit(SPI_HandleTypeDef* hspi)
   */
 void HAL_PCD_MspInit(PCD_HandleTypeDef* hpcd)
 {
-  RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
   if(hpcd->Instance==USB_DRD_FS)
   {
     /* USER CODE BEGIN USB_DRD_FS_MspInit 0 */
 
     /* USER CODE END USB_DRD_FS_MspInit 0 */
 
-  /** Initializes the peripherals clock
-  */
-    PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_USB;
-    PeriphClkInitStruct.UsbClockSelection = RCC_USBCLKSOURCE_HSI48;
-    if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
-    {
-      Error_Handler();
-    }
-
     /* Enable VDDUSB */
     HAL_PWREx_EnableVddUSB();
     /* Peripheral clock enable */
     __HAL_RCC_USB_CLK_ENABLE();
     /* USER CODE BEGIN USB_DRD_FS_MspInit 1 */
+
+    /* USBX DCD callbacks are serviced below sensor/radio EXTI priority. */
+    HAL_NVIC_SetPriority(USB_DRD_FS_IRQn, 7, 0);
+    HAL_NVIC_EnableIRQ(USB_DRD_FS_IRQn);
 
     /* USER CODE END USB_DRD_FS_MspInit 1 */
 
@@ -525,6 +519,8 @@ void HAL_PCD_MspDeInit(PCD_HandleTypeDef* hpcd)
     /* Peripheral clock disable */
     __HAL_RCC_USB_CLK_DISABLE();
     /* USER CODE BEGIN USB_DRD_FS_MspDeInit 1 */
+
+    HAL_NVIC_DisableIRQ(USB_DRD_FS_IRQn);
 
     /* USER CODE END USB_DRD_FS_MspDeInit 1 */
   }

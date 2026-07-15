@@ -40,7 +40,12 @@ _estack = ORIGIN(RAM) + LENGTH(RAM); /* end of "RAM" Ram type memory */
 _sstack = _estack - _Min_Stack_Size;
 
 _Min_Heap_Size = 0x200; /* required amount of heap */
-_Min_Stack_Size = 0x400; /* required amount of stack */
+/*
+ * The cooperative app's worst Debug call chains include the 400-byte app
+ * frame plus 360-528-byte EKF/radio frames and HAL/C-library work.  A 1 KiB
+ * MSPLIM caused a hardware STKOF HardFault during the first live run.
+ */
+_Min_Stack_Size = 0x2000; /* 8 KiB MSP stack with margin for interrupts */
 
 /* Memories definition */
 MEMORY

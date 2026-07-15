@@ -1,21 +1,34 @@
 /*
- * PROJECT FILE OVERVIEW
- * Comment made: 2026-07-07 17:44:48 -04:00
+ * AMBAR BOARD SENSOR ADAPTER - PUBLIC INTERFACE
  *
- * What this file does:
- *   This header describes the board-level sensor layer. It gathers IMU, barometer, and magnetometer drivers and exposes raw and converted readings for the flight app.
+ * Purpose and ownership
+ *   Groups the three board sensor drivers and exposes both raw bus values and
+ *   converted SI-unit samples.  This layer owns rocket-axis selection, stationary
+ *   pad acceleration, pressure zero, and EXTI data-ready hints; the EKF never
+ *   reads a sensor driver directly.
  *
- * Process flow:
- *   Sensors initialize, a pad reference is captured, then IMU and barometer readings convert into EKF-ready units. Raw readings remain available for telemetry and debugging.
+ * Sensor flow
+ *   Init starts the LSM6DSV32X IMU and BMP388 barometer required by the vertical
+ *   estimate; LIS2MDL is optional telemetry.  ResetPadReference, or validated
+ *   stored configuration, establishes the common pad zero.  Rate-specific read
+ *   calls then supply upward acceleration and altitude AGL to AmbarApp.  See
+ *   CODE_GUIDE.md [ARCH-2].
  *
- * Main variables and what can be changed:
- *   ROCKET_IMU_VERTICAL_ACCEL_INDEX and ROCKET_IMU_VERTICAL_ACCEL_SIGN are the main orientation settings. They must be checked on the bench with the PCB in rocket orientation.
+ * Section map
+ *   1. Compile-time orientation fallback and pad-capture default
+ *   2. Board-owned driver handles
+ *   3. Raw, converted, and calibration-status snapshots
+ *   4. Initialization/calibration API
+ *   5. Rate-specific and diagnostic read API
+ *   6. EXTI data-ready API
  *
- * Assumptions:
- *   The rocket is still during pad reset. The first EKF uses only vertical IMU acceleration and BMP388 altitude; LIS2MDL remains telemetry and health only.
- *
- * What is missing:
- *   No automatic orientation detection, sensor interrupt scheduling, stored calibration, or sensor redundancy is implemented.
+ * Safety and assumptions
+ *   Bench-verify the axis/sign with the installed PCB orientation and capture the
+ *   pad reference only while upright and motionless.  A valid converted sample
+ *   does not by itself prove the pad reference is valid; inspect the accompanying
+ *   flag.  Magnetometer health is reported but does not gate the vertical EKF.
+ *   There is no automatic orientation detection, redundant sensor voting, or
+ *   pressure-vent dynamics model.
  */
 
 #ifndef ROCKET_SENSORS_H
@@ -32,21 +45,9 @@ extern "C" {
 #include <stdbool.h>
 #include <stdint.h>
 
-/*
- * ===================== AMBAR EKF PCB INTEGRATION - UPDATED FILE =====================
- *
- * The flight estimator needs converted SI-unit samples, not just raw sensor words.
- * This header keeps the raw telemetry path intact and adds a converted-data path:
- *   - LSM6DSV32X accelerometer raw counts -> m/s^2 at the configured 32 g scale.
- *   - One configured IMU axis/sign -> rocket vertical acceleration.
- *   - Pad reset -> subtract stationary acceleration and pressure baseline.
- *   - BMP388 compensated pressure -> altitude above ground level.
- *
- * The vertical-axis constants are intentionally configurable.  Before flight, put
- * the PCB in the rocket orientation, run the pad reset, and verify stationary
- * vertical acceleration is close to zero in telemetry.
- */
+/* ===================== ORIENTATION AND PAD-CAPTURE DEFAULTS ===================== */
 
+/* Saved runtime config may override this fallback after boot. */
 #ifndef ROCKET_IMU_VERTICAL_ACCEL_INDEX
 #define ROCKET_IMU_VERTICAL_ACCEL_INDEX LSM6DSV32X_ACCEL_Z
 #endif
@@ -57,9 +58,13 @@ extern "C" {
 
 #define ROCKET_PAD_REFERENCE_DEFAULT_SAMPLES 32U
 
+/* ===================== BOARD-OWNED DRIVER HANDLES ===================== */
+
 extern LSM6DSV32X_HandleTypeDef rocket_imu;
 extern LIS2MDL_HandleTypeDef rocket_mag;
 extern BMP388_HandleTypeDef rocket_baro;
+
+/* ===================== SENSOR SNAPSHOTS ===================== */
 
 typedef struct
 {
@@ -67,9 +72,9 @@ typedef struct
      * Raw telemetry mirrors the physical bus reads.  These fields are useful for
      * checking byte order, sensor saturation, and wiring before trusting the EKF.
      */
-    int16_t imu[LSM6DSV32X_DATA_COUNT];     // gyro_x/y/z, accel_x/y/z
-    int16_t mag[LIS2MDL_DATA_COUNT];        // mag_x/y/z
-    uint32_t baro[BMP388_DATA_COUNT];       // raw_pressure, raw_temperature
+    int16_t imu[LSM6DSV32X_DATA_COUNT];     /* gyro_x/y/z, accel_x/y/z */
+    int16_t mag[LIS2MDL_DATA_COUNT];        /* mag_x/y/z */
+    uint32_t baro[BMP388_DATA_COUNT];       /* raw_pressure, raw_temperature */
 } RocketSensorRawData_t;
 
 typedef struct
@@ -94,6 +99,7 @@ typedef struct
 
 typedef struct
 {
+    /* Persistable orientation/pad values plus live interrupt/status diagnostics. */
     int32_t vertical_axis_index;
     float vertical_axis_sign;
     float pad_vertical_accel_mps2;
@@ -106,6 +112,9 @@ typedef struct
     bool pad_reference_valid;
 } RocketSensorCalibrationStatus_t;
 
+/* ===================== INITIALIZATION AND CALIBRATION API ===================== */
+
+/* Required IMU/barometer failures return HAL_ERROR; magnetometer is optional. */
 HAL_StatusTypeDef RocketSensors_Init(void);
 
 /* Runtime orientation/config hooks loaded from ambar_config. */
@@ -119,6 +128,8 @@ RocketSensorCalibrationStatus_t RocketSensors_GetCalibrationStatus(void);
  * acceleration or altitude zero.
  */
 HAL_StatusTypeDef RocketSensors_ResetPadReference(uint16_t sample_count);
+
+/* ===================== SENSOR READ API ===================== */
 
 /* Read all raw sensors once for telemetry. */
 HAL_StatusTypeDef RocketSensors_ReadAll(
@@ -141,6 +152,8 @@ HAL_StatusTypeDef RocketSensors_ReadMagnetometerRaw(RocketSensorRawData_t *raw);
 /* Convenience helper for diagnostics that want one full converted snapshot. */
 HAL_StatusTypeDef RocketSensors_ReadAllConverted(RocketSensorRawData_t *raw,
                                                  RocketSensorConvertedData_t *converted);
+
+/* ===================== EXTI DATA-READY API ===================== */
 
 /* EXTI-assisted data-ready flags.  Scheduler polling remains as fallback. */
 void RocketSensors_HandleExtiPin(uint16_t GPIO_Pin);

@@ -1,21 +1,27 @@
 /*
- * PROJECT FILE OVERVIEW
- * Comment made: 2026-07-07 17:44:48 -04:00
+ * AMBAR SX1280 BOARD PORT - PUBLIC INTERFACE
  *
- * What this file does:
- *   This header separates SX1280 board wiring from the radio command driver. It names functions for chip select, reset, BUSY, and SPI.
+ * Purpose and ownership
+ *   Isolates the generic SX1280 command driver from Airbrake PCB wiring and HAL
+ *   handles.  It is the only SX1280 layer that knows about SPI1 and the generated
+ *   LORA_CS, LORA_NRESET, and LORA_BUSY symbols from main.h.
  *
- * Process flow:
- *   sx1280.c asks this port layer to select the chip, reset it, wait until it is ready, and clock bytes over SPI1.
+ * Transaction flow
+ *   sx1280.c waits for BUSY low, asserts chip select, clocks one full-duplex SPI
+ *   command, releases chip select, and waits for BUSY again.  PortReset supplies
+ *   the hardware reset timing used at startup and TX-failure recovery.  This is
+ *   the board-binding edge of CODE_GUIDE.md [ARCH-6].
  *
- * Main variables and what can be changed:
- *   There are no tuning values here. Pin names come from main.h and should change through CubeMX if PCB routing changes.
+ * Section map
+ *   1. Port initialization and reset/chip-select control
+ *   2. BUSY pacing and SPI transfer API
  *
- * Assumptions:
- *   The SX1280 uses SPI1 and the LORA pins defined in main.h.
- *
- * What is missing:
- *   No DMA SPI transfers or separate timeout tuning for different radio command types is implemented.
+ * Safety and assumptions
+ *   Cube-generated GPIO and SPI1 initialization must complete before these calls.
+ *   BUSY waits and SPI transfers are bounded but polling/blocking; callers must
+ *   keep timeouts compatible with the cooperative scheduler.  Pin-routing changes
+ *   belong in CubeMX/main.h and this port, not in the modem command driver.  DMA
+ *   and asynchronous SPI completion are not implemented.
  */
 
 #ifndef SX1280_PORT_H
@@ -24,14 +30,7 @@
 #include "main.h"
 #include <stdint.h>
 
-/*
- * SX1280 board-port layer.
- *
- * The generic radio code calls these functions instead of touching pins and SPI
- * directly.  That keeps all Airbrake PCB pin assignments in one small file:
- * SPI1 for bytes, LORA_CS for chip select, LORA_NRESET for reset, and LORA_BUSY
- * for command pacing.
- */
+/* ===================== BOARD PORT API ===================== */
 
 /* Put the radio control pins into their idle levels after Cube GPIO init. */
 HAL_StatusTypeDef SX1280_PortInit(void);

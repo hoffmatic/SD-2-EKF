@@ -1,33 +1,34 @@
 /*
- * PROJECT FILE OVERVIEW
- * Comment made: 2026-07-07 17:44:48 -04:00
+ * AMBAR FLIGHT ESTIMATION AND DEPLOYMENT POLICY - PUBLIC INTERFACE
  *
- * What this file does:
- *   This header describes the flight-control layer above the EKF. It names flight phases, inhibit reasons, controller settings, and the output snapshot used by telemetry and actuator safety.
+ * Purpose and ownership
+ *   Defines the phase vocabulary, inhibit bits, tuning blocks, requested
+ *   airbrake command, and combined output snapshot above the vertical EKF.
+ *   The implementation owns one embedded flight-computer instance; callers feed
+ *   sensor updates and read copies of its latest decision state.
  *
- * Process flow:
- *   Sensor updates feed the EKF. The flight layer watches altitude, speed, and acceleration to decide phase, then computes a deployment request or explains why deployment is inhibited.
+ * Decision flow
+ *   Sensor samples update the EKF and phase machine.  The selected apogee model
+ *   predicts the coast result.  Target error is converted to a bounded 0..1
+ *   deploy_fraction only after arming, phase, altitude, time, direction, and
+ *   estimator-health gates pass.  See CODE_GUIDE.md [ARCH-4].  The actuator
+ *   layer remains final authority over physical motion; this API is a request.
  *
- * Main variables and what can be changed:
- *   Phase thresholds and controller values can be tuned. Target apogee, tolerance, minimum deployment altitude, and minimum flight time are expected to change as the vehicle is characterized.
+ * Section map
+ *   1. Flight phases, inhibit bits, and predictor mode
+ *   2. Estimator/phase/controller/predictor configuration
+ *   3. Command and output snapshots
+ *   4. Lifecycle, arming, sensor-update, and read-only output API
  *
- * Assumptions:
- *   Deployment can only be considered during coast. Any fault or descent should force a safe retracted command.
- *
- * What is missing:
- *   There is no launch arming switch, flight-mode command protocol, drag table, or actuator-effectiveness model yet.
+ * Safety and assumptions
+ *   Coast is the only deployable phase, and every inhibit forces a zero request.
+ *   Predictor and controller parameters must be replaced or validated using the
+ *   actual vehicle and representative replay/HIL data.  The forward model is
+ *   vertical-only; it is not an aerodynamic table or six-degree-of-freedom model.
  */
 
 #ifndef AMBAR_FLIGHT_H
 #define AMBAR_FLIGHT_H
-
-/*
- * ===================== AMBAR EKF PCB INTEGRATION - NEW FILE =====================
- *
- * This header wraps the EKF in the flight logic the PCB firmware needs:
- * phase tracking, apogee-error control, inhibit flags, and a single output
- * snapshot for telemetry and the actuator safety gate.
- */
 
 #ifdef __cplusplus
 extern "C" {
@@ -37,6 +38,8 @@ extern "C" {
 
 #include <stdbool.h>
 #include <stdint.h>
+
+/* ===================== PHASES, INHIBITS, AND PREDICTOR MODE ===================== */
 
 typedef enum
 {
@@ -89,6 +92,8 @@ typedef enum
     AMBAR_APOGEE_MODE_DRAG = 1
 } AmbarApogeePredictionMode_t;
 
+/* ===================== FLIGHT CONFIGURATION ===================== */
+
 typedef struct
 {
     /* Altitude/acceleration thresholds used to leave pad idle. */
@@ -128,8 +133,6 @@ typedef struct
 typedef struct
 {
     /*
-     * BEGIN AMBAR BENCH-GATED EXPANSION - DRAG APOGEE SETTINGS
-     *
      * These values let bench/replay work switch between the old ballistic
      * predictor and a simple drag-aware coast estimate without changing the EKF
      * state.  They are deliberately plain floats so they can be saved in the
@@ -142,8 +145,9 @@ typedef struct
     float time_step_s;
     float max_predict_time_s;
     float actuator_effectiveness;
-    /* END AMBAR BENCH-GATED EXPANSION - DRAG APOGEE SETTINGS */
 } AmbarApogeePredictorConfig_t;
+
+/* ===================== COMMAND AND OUTPUT SNAPSHOTS ===================== */
 
 typedef struct
 {
@@ -184,6 +188,8 @@ typedef struct
     float drag_apogee_m;
     bool armed;
 } AmbarFlightOutput_t;
+
+/* ===================== PUBLIC API ===================== */
 
 /* Create default estimator, phase, and controller tuning values. */
 AmbarFlightConfig_t AmbarFlight_DefaultConfig(void);

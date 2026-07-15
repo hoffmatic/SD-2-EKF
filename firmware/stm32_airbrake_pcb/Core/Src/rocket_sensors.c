@@ -1,39 +1,47 @@
 /*
- * PROJECT FILE OVERVIEW
- * Comment made: 2026-07-07 17:44:48 -04:00
+ * AMBAR BOARD SENSOR ADAPTER - IMPLEMENTATION
  *
- * What this file does:
- *   This file bridges raw hardware sensors to flight-ready values. It converts IMU counts to acceleration, barometer pressure to altitude, and keeps raw sensor words for telemetry.
+ * Purpose
+ *   Owns the board-level LSM6DSV32X, BMP388, and LIS2MDL instances and converts
+ *   their raw bus data into the pad-relative SI-unit channels used by the
+ *   vertical estimator.  Raw counts remain available for bring-up and telemetry.
  *
- * Process flow:
- *   Startup initializes IMU, magnetometer, and barometer. Pad reset averages stationary acceleration and pressure. Later IMU reads subtract pad acceleration, and barometer reads use pad pressure as zero altitude.
+ * Data flow
+ *   Init starts the required IMU/barometer and optional magnetometer.  A pad
+ *   capture or stored configuration establishes the stationary vertical
+ *   acceleration and pressure baselines.  IMU reads select the configured
+ *   rocket axis/sign and subtract the pad value; barometer reads compensate raw
+ *   pressure and convert it to altitude above the pad.  AmbarApp feeds those
+ *   channels into AmbarFlight/AmbarEkf as described in CODE_GUIDE.md [ARCH-2].
  *
- * Main variables and what can be changed:
- *   ROCKET_IMU_VERTICAL_ACCEL_INDEX and ROCKET_IMU_VERTICAL_ACCEL_SIGN set rocket vertical. Scale constants should only change if sensor driver ranges change.
+ * Section map
+ *   1. Board mapping, conversion constants, and driver handles
+ *   2. Calibration/data-ready module state
+ *   3. Private unit/orientation/pressure helpers
+ *   4. Runtime calibration access
+ *   5. Sensor initialization and stationary pad capture
+ *   6. Raw/converted read API
+ *   7. EXTI data-ready callbacks and consumers
  *
- * Assumptions:
- *   The pad reference is captured while upright and motionless. Positive vertical acceleration should point upward after the axis and sign are verified.
- *
- * What is missing:
- *   No stored calibration, automatic axis detection, pressure venting model, or sensor data-ready interrupt support is included.
+ * Safety and assumptions
+ *   The pad reference must be captured upright and motionless, and the configured
+ *   axis/sign must be bench-verified so upward acceleration is positive.  Scale
+ *   factors assume the driver ranges shown below.  Pad capture uses short HAL
+ *   delays and belongs in setup/reset flow, not a time-critical sensor tick.
+ *   Magnetometer failure does not invalidate this vertical estimator.  There is
+ *   no automatic orientation detection, sensor redundancy, or pressure-vent model.
  */
 
 #include "rocket_sensors.h"
 
+#include "ambar_features.h"
 #include "main.h"
 
 #include <math.h>
 #include <stddef.h>
 #include <string.h>
 
-/*
- * ===================== AMBAR EKF PCB INTEGRATION - UPDATED FILE =====================
- *
- * This file is the boundary between board hardware and flight math.  Raw reads are
- * preserved for telemetry, while the new helper functions convert samples into
- * the units the EKF actually models: vertical acceleration in m/s^2 and altitude
- * above the pad in meters.
- */
+/* ===================== BOARD MAPPING AND CONVERSION CONSTANTS ===================== */
 
 extern I2C_HandleTypeDef hi2c1;
 extern I2C_HandleTypeDef hi2c2;
@@ -56,6 +64,8 @@ extern I2C_HandleTypeDef hi2c3;
 #define ROCKET_LSM6_GYRO_4000DPS_PER_LSB   0.140f
 #define ROCKET_ALTITUDE_EXPONENT           0.190294957f
 
+/* ===================== BOARD-OWNED DRIVER HANDLES ===================== */
+
 LSM6DSV32X_HandleTypeDef rocket_imu = {
     /* I2C1: primary acceleration source for the EKF propagation step. */
     .hi2c = &ROCKET_IMU_I2C_HANDLE,
@@ -77,13 +87,18 @@ BMP388_HandleTypeDef rocket_baro = {
     .chip_id = 0U
 };
 
+/* ===================== CALIBRATION AND DATA-READY STATE ===================== */
+
+/* Pad baselines share the zero reference used by both converted sensor paths. */
 static float s_vertical_accel_pad_mps2 = 0.0f;
-/* Stationary vertical acceleration measured during pad reset. */
 static float s_pad_pressure_pa = 0.0f;
-/* Mean pad pressure used as the zero-altitude barometer reference. */
 static bool s_pad_reference_valid = false;
+
+/* Runtime orientation may come from saved config; macros provide safe defaults. */
 static int32_t s_vertical_axis_index = ROCKET_IMU_VERTICAL_ACCEL_INDEX;
 static float s_vertical_axis_sign = ROCKET_IMU_VERTICAL_ACCEL_SIGN;
+
+/* ISR-set flags are consumed by the cooperative scheduler; counters remain diagnostic. */
 static volatile uint8_t s_imu_data_ready_seen = 0U;
 static volatile uint8_t s_baro_data_ready_seen = 0U;
 static uint32_t s_imu_data_ready_count = 0U;
@@ -91,6 +106,8 @@ static uint32_t s_baro_data_ready_count = 0U;
 static uint8_t s_last_imu_status = 0U;
 static uint8_t s_last_baro_status = 0U;
 static uint8_t s_last_baro_error = 0U;
+
+/* ===================== PRIVATE CONVERSION HELPERS ===================== */
 
 static float rocket_accel_mps2_from_raw(int16_t raw)
 {
@@ -107,8 +124,6 @@ static float rocket_gyro_dps_from_raw(int16_t raw)
 static float rocket_signed_vertical_accel(const int16_t imu[LSM6DSV32X_DATA_COUNT])
 {
     /*
-     * BEGIN AMBAR EKF PCB INTEGRATION - CONFIGURABLE VERTICAL AXIS
-     *
      * The PCB orientation was not safe to hard-code from the schematic alone.
      * Change ROCKET_IMU_VERTICAL_ACCEL_INDEX and ROCKET_IMU_VERTICAL_ACCEL_SIGN
      * after the bench orientation check so positive acceleration points upward
@@ -121,14 +136,13 @@ static float rocket_signed_vertical_accel(const int16_t imu[LSM6DSV32X_DATA_COUN
     }
 
     return s_vertical_axis_sign * rocket_accel_mps2_from_raw(imu[axis]);
-    /* END AMBAR EKF PCB INTEGRATION - CONFIGURABLE VERTICAL AXIS */
 }
+
+/* ===================== RUNTIME ORIENTATION AND PAD REFERENCE ===================== */
 
 HAL_StatusTypeDef RocketSensors_ApplyOrientationConfig(int32_t axis_index, float axis_sign)
 {
     /*
-     * BEGIN AMBAR BENCH-GATED EXPANSION - STORED ORIENTATION SETTINGS
-     *
      * The first EKF build used compile-time axis/sign values.  This lets the
      * bench config choose the vertical accelerometer axis after the PCB is placed
      * in the rocket orientation, without recompiling the firmware.
@@ -146,9 +160,9 @@ HAL_StatusTypeDef RocketSensors_ApplyOrientationConfig(int32_t axis_index, float
     s_vertical_axis_index = axis_index;
     s_vertical_axis_sign = (axis_sign >= 0.0f) ? 1.0f : -1.0f;
     return HAL_OK;
-    /* END AMBAR BENCH-GATED EXPANSION - STORED ORIENTATION SETTINGS */
 }
 
+/* Restore or inject a pad baseline only after both SI values pass sanity checks. */
 HAL_StatusTypeDef RocketSensors_SetPadReference(float vertical_accel_mps2, float pressure_pa)
 {
     if (!isfinite(vertical_accel_mps2) || !isfinite(pressure_pa) || pressure_pa <= 0.0f)
@@ -163,6 +177,7 @@ HAL_StatusTypeDef RocketSensors_SetPadReference(float vertical_accel_mps2, float
     return HAL_OK;
 }
 
+/* Return calibration, interrupt counts, and last sensor status without bus access. */
 RocketSensorCalibrationStatus_t RocketSensors_GetCalibrationStatus(void)
 {
     RocketSensorCalibrationStatus_t status;
@@ -182,6 +197,8 @@ RocketSensorCalibrationStatus_t RocketSensors_GetCalibrationStatus(void)
     return status;
 }
 
+/* ===================== CONVERTED-SAMPLE HELPERS ===================== */
+
 static float rocket_altitude_from_pressure(float pressure_pa, float reference_pressure_pa)
 {
     if (pressure_pa <= 0.0f || reference_pressure_pa <= 0.0f)
@@ -190,15 +207,12 @@ static float rocket_altitude_from_pressure(float pressure_pa, float reference_pr
     }
 
     /*
-     * BEGIN AMBAR EKF PCB INTEGRATION - PAD-RELATIVE BARO ALTITUDE
-     *
      * The pad pressure captured during reset is the zero-altitude reference.
      * This gives altitude AGL for the barometer correction without requiring a
      * launch-site sea-level pressure setting.
      */
     return 44330.0f
          * (1.0f - powf(pressure_pa / reference_pressure_pa, ROCKET_ALTITUDE_EXPONENT));
-    /* END AMBAR EKF PCB INTEGRATION - PAD-RELATIVE BARO ALTITUDE */
 }
 
 static void rocket_fill_converted_imu(const RocketSensorRawData_t *raw,
@@ -222,14 +236,14 @@ static void rocket_fill_converted_imu(const RocketSensorRawData_t *raw,
     converted->pad_reference_valid = s_pad_reference_valid;
 }
 
+/* ===================== INITIALIZATION AND STATIONARY PAD CAPTURE ===================== */
+
 HAL_StatusTypeDef RocketSensors_Init(void)
 {
     HAL_StatusTypeDef status;
     HAL_StatusTypeDef overall_status = HAL_OK;
 
     /*
-     * BEGIN AMBAR EKF PCB INTEGRATION - SENSOR INIT POLICY
-     *
      * The first estimator only needs the IMU and BMP388.  LIS2MDL is still read
      * for health/telemetry, but a magnetometer init fault should not prevent pad
      * reference capture or vertical EKF operation.
@@ -241,18 +255,20 @@ HAL_StatusTypeDef RocketSensors_Init(void)
         overall_status = HAL_ERROR;
     }
 
+#if AMBAR_FEATURE_MAGNETOMETER_TELEMETRY
     status = LIS2MDL_Init(&rocket_mag);
     (void)status;
+#endif
 
     status = BMP388_Init(&rocket_baro);
     if (status != HAL_OK) { overall_status = HAL_ERROR; }
-    /* END AMBAR EKF PCB INTEGRATION - SENSOR INIT POLICY */
 
     return overall_status;
 }
 
 HAL_StatusTypeDef RocketSensors_ResetPadReference(uint16_t sample_count)
 {
+    /* Average independent successful IMU and pressure reads while stationary. */
     if (sample_count == 0U)
     {
         sample_count = 1U;
@@ -264,8 +280,6 @@ HAL_StatusTypeDef RocketSensors_ResetPadReference(uint16_t sample_count)
     uint16_t pressure_count = 0U;
 
     /*
-     * BEGIN AMBAR EKF PCB INTEGRATION - PAD ZERO CAPTURE
-     *
      * Average a short stationary window on the pad.  The acceleration average is
      * subtracted from future vertical acceleration samples, and pressure average
      * becomes the altitude AGL reference.
@@ -302,9 +316,10 @@ HAL_StatusTypeDef RocketSensors_ResetPadReference(uint16_t sample_count)
     s_pad_pressure_pa = pressure_sum / (float)pressure_count;
     s_pad_reference_valid = s_pad_pressure_pa > 0.0f;
 
-    /* END AMBAR EKF PCB INTEGRATION - PAD ZERO CAPTURE */
     return s_pad_reference_valid ? HAL_OK : HAL_ERROR;
 }
+
+/* ===================== RAW AND CONVERTED SENSOR READS ===================== */
 
 HAL_StatusTypeDef RocketSensors_ReadAll(
     RocketSensorRawData_t *data,
@@ -415,17 +430,24 @@ HAL_StatusTypeDef RocketSensors_ReadBarometerConverted(RocketSensorRawData_t *ra
 
 HAL_StatusTypeDef RocketSensors_ReadMagnetometerRaw(RocketSensorRawData_t *raw)
 {
+    /* Optional telemetry path; it never supplies a state to the vertical EKF. */
     if (raw == NULL)
     {
         return HAL_ERROR;
     }
 
+#if AMBAR_FEATURE_MAGNETOMETER_TELEMETRY
     return LIS2MDL_ReadData(&rocket_mag, raw->mag);
+#else
+    memset(raw->mag, 0, sizeof(raw->mag));
+    return HAL_ERROR;
+#endif
 }
 
 HAL_StatusTypeDef RocketSensors_ReadAllConverted(RocketSensorRawData_t *raw,
                                                  RocketSensorConvertedData_t *converted)
 {
+    /* Diagnostic snapshot; scheduled flight code normally reads each rate separately. */
     if (raw == NULL || converted == NULL)
     {
         return HAL_ERROR;
@@ -440,8 +462,6 @@ HAL_StatusTypeDef RocketSensors_ReadAllConverted(RocketSensorRawData_t *raw,
     converted->magnetometer_valid = mag_status == HAL_OK;
 
     /*
-     * BEGIN AMBAR EKF PCB INTEGRATION - MAGNETOMETER IS TELEMETRY ONLY
-     *
      * A magnetometer fault is visible in converted->magnetometer_valid, but it
      * does not make the vertical EKF sample invalid.  IMU and barometer remain
      * the required sensors for this first PCB estimator.
@@ -451,12 +471,14 @@ HAL_StatusTypeDef RocketSensors_ReadAllConverted(RocketSensorRawData_t *raw,
         return HAL_ERROR;
     }
 
-    /* END AMBAR EKF PCB INTEGRATION - MAGNETOMETER IS TELEMETRY ONLY */
     return HAL_OK;
 }
 
+/* ===================== EXTI DATA-READY ENTRY POINTS ===================== */
+
 void RocketSensors_HandleExtiPin(uint16_t GPIO_Pin)
 {
+    /* Keep ISR work bounded: latch occurrence and count it; bus reads happen later. */
     if (GPIO_Pin == I2C1_INT_Pin)
     {
         s_imu_data_ready_seen = 1U;
@@ -471,6 +493,7 @@ void RocketSensors_HandleExtiPin(uint16_t GPIO_Pin)
 
 bool RocketSensors_ConsumeImuDataReady(void)
 {
+    /* Coalesces multiple interrupts into one pending scheduler hint. */
     if (s_imu_data_ready_seen == 0U)
     {
         return false;
@@ -482,6 +505,7 @@ bool RocketSensors_ConsumeImuDataReady(void)
 
 bool RocketSensors_ConsumeBarometerDataReady(void)
 {
+    /* Polling remains a fallback, so false is not itself a sensor fault. */
     if (s_baro_data_ready_seen == 0U)
     {
         return false;

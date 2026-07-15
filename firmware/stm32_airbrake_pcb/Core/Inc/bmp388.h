@@ -1,21 +1,16 @@
-/*
- * PROJECT FILE OVERVIEW
- * Comment made: 2026-07-07 17:44:48 -04:00
+/**
+ * @file bmp388.h
+ * @brief BMP388 pressure/temperature driver and factory compensation state.
  *
- * What this file does:
- *   This header describes the BMP388 barometer driver. The barometer provides pressure and temperature, which become altitude above the launch pad for EKF correction.
+ * Startup verifies the chip, performs a soft reset, loads all 21 factory trim
+ * bytes, configures 50 Hz pressure/temperature sampling, and enters normal
+ * mode.  Runtime callers may retain raw 24-bit values for logs or request
+ * compensated pascals/degrees Celsius for pad-relative altitude and the EKF.
  *
- * Process flow:
- *   Startup verifies chip ID, resets the sensor, reads factory calibration values, and starts normal pressure and temperature mode. Later reads return raw data or compensated pressure and temperature.
- *
- * Main variables and what can be changed:
- *   The I2C address can change between 0x76 and 0x77 if the hardware strap changes. Oversampling and filter settings are in bmp388.c.
- *
- * Assumptions:
- *   Factory calibration registers are valid and must be read before compensated pressure is trusted.
- *
- * What is missing:
- *   No interrupt-driven data-ready path, pressure venting correction, or reference-sensor validation is included yet.
+ * Calibration must be loaded before compensated samples are accepted.  The
+ * current implementation is polling-based and assumes the PCB's pressure port
+ * exposes ambient pressure without a measured lag correction.  See
+ * CODE_GUIDE.md [ARCH-2].
  */
 
 #ifndef BMP388_H
@@ -28,21 +23,11 @@ extern "C" {
 #include "stm32h5xx_hal.h"
 #include <stdint.h>
 
-/*
- * ===================== AMBAR EKF PCB INTEGRATION - UPDATED FILE =====================
- *
- * This driver still exposes the original raw 24-bit pressure/temperature words, but
- * it now also stores the BMP388 factory calibration constants and can return fully
- * compensated pressure in pascals plus temperature in degrees C.  The EKF scheduler
- * uses the compensated pressure so the flight layer can compute altitude above the
- * pad instead of trying to estimate from raw ADC counts.
- */
-
-// 7-bit I2C addresses. Use the unshifted value in the handle.
-// SDO = GND -> 0x76. SDO = VDDIO -> 0x77.
+/* Seven-bit addresses stored unshifted in BMP388_HandleTypeDef. */
 #define BMP388_I2C_ADDR_LOW          0x76U
 #define BMP388_I2C_ADDR_HIGH         0x77U
 
+/* Register map and immutable device identity. */
 #define BMP388_CHIP_ID_REG           0x00U
 #define BMP388_CHIP_ID_VALUE         0x50U
 #define BMP388_ERR_REG               0x02U
@@ -58,7 +43,7 @@ extern "C" {
 
 #define BMP388_CMD_SOFT_RESET        0xB6U
 
-// Data order returned by BMP388_ReadRawData()
+/** Stable array order returned by BMP388_ReadRawData(). */
 typedef enum
 {
     BMP388_RAW_PRESSURE = 0,
@@ -106,35 +91,36 @@ typedef struct
     BMP388_CalibrationData_t calibration;
 } BMP388_HandleTypeDef;
 
-/* Reset, verify chip ID, load calibration, and start normal pressure/temp mode. */
+/** @brief Reset, identify, calibrate, configure, and start the barometer. */
 HAL_StatusTypeDef BMP388_Init(BMP388_HandleTypeDef *dev);
+/** @brief Read the device identity register without changing configuration. */
 HAL_StatusTypeDef BMP388_ReadChipID(BMP388_HandleTypeDef *dev, uint8_t *chip_id);
+/** @brief Read BMP388 data-ready/status bits. */
 HAL_StatusTypeDef BMP388_ReadStatus(BMP388_HandleTypeDef *dev, uint8_t *status);
+/** @brief Read BMP388 command/configuration error bits. */
 HAL_StatusTypeDef BMP388_ReadError(BMP388_HandleTypeDef *dev, uint8_t *error);
 
-// Fills data[2] as: raw_pressure_24bit, raw_temperature_24bit.
+/** @brief Read raw unsigned 24-bit pressure and temperature ADC values. */
 HAL_StatusTypeDef BMP388_ReadRawData(BMP388_HandleTypeDef *dev,
                                      uint32_t data[BMP388_DATA_COUNT]);
 
-/* BEGIN AMBAR EKF PCB INTEGRATION - NEW COMPENSATED BAROMETER API */
-/*
- * Converts BMP388 raw pressure/temperature samples into real-world units using
- * the calibration block read during BMP388_Init().  Pressure is returned in Pa;
- * temperature is returned in degrees C.  These are the values used for pad-zeroed
- * altitude before the EKF barometer correction step.
+/**
+ * @brief Apply cached Bosch trim coefficients to one raw sample pair.
+ * @return HAL_ERROR when calibration has not been loaded or an output is NULL.
  */
 HAL_StatusTypeDef BMP388_CompensateRawData(BMP388_HandleTypeDef *dev,
                                            uint32_t raw_pressure,
                                            uint32_t raw_temperature,
                                            float *pressure_pa,
                                            float *temperature_c);
+
+/** @brief Read and compensate one pressure/temperature sample in a single call. */
 HAL_StatusTypeDef BMP388_ReadPressureTemperature(BMP388_HandleTypeDef *dev,
                                                  float *pressure_pa,
                                                  float *temperature_c);
-/* END AMBAR EKF PCB INTEGRATION - NEW COMPENSATED BAROMETER API */
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif // BMP388_H
+#endif /* BMP388_H */

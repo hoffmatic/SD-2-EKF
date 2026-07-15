@@ -1,45 +1,38 @@
 /*
- * PROJECT FILE OVERVIEW
- * Comment made: 2026-07-07 17:44:48 -04:00
+ * AMBAR VERTICAL EXTENDED KALMAN FILTER - PUBLIC INTERFACE
  *
- * What this file does:
- *   This header describes the vertical Extended Kalman Filter. It estimates altitude, vertical speed, predicted apogee, accelerometer bias, barometer bias, and health.
+ * Purpose and ownership
+ *   Defines the tuning, runtime state, and copy-out snapshots for the four-state
+ *   vertical estimator.  The caller owns AmbarEkf_t storage; the implementation
+ *   performs no allocation and exposes no mutable global estimator state.
  *
- * Process flow:
- *   IMU prediction moves altitude and velocity forward in time. Barometer correction pulls altitude back toward pressure altitude. Health counters track rejected IMU timestamps and pressure samples.
+ * Update contract
+ *   ResetOnPad establishes zero altitude/velocity and the first IMU timestamp.
+ *   PropagateImu consumes pad-zeroed upward acceleration.  UpdateBarometer
+ *   consumes altitude above the same pad reference plus measurement uncertainty.
+ *   GetEstimate/GetHealth return copies suitable for flight logic and telemetry.
+ *   See CODE_GUIDE.md [ARCH-2] for the sensor path and [ARCH-4] for how the
+ *   flight layer consumes the estimate.
  *
- * Main variables and what can be changed:
- *   AmbarEkfConfig_t is the tuning area. Noise values, initial variances, timestamp limits, and the barometer gate can be changed after bench and replay testing.
+ * State order
+ *   [0] altitude AGL (m), [1] vertical velocity (m/s),
+ *   [2] accelerometer bias (m/s^2), [3] barometer altitude bias (m).
  *
- * Assumptions:
- *   IMU acceleration entering the filter is already pointed along rocket vertical and has pad static acceleration removed.
+ * Section map
+ *   1. Shared units and default mission targets
+ *   2. Tuning and output data types
+ *   3. Caller-owned runtime state
+ *   4. Lifecycle, update, and snapshot API
  *
- * What is missing:
- *   This is vertical-only. It does not estimate attitude, horizontal motion, drag, wind, or full vehicle dynamics.
+ * Safety and assumptions
+ *   Positive is upward.  Axis selection, gravity/static-pad removal, and pressure
+ *   referencing belong to rocket_sensors.  Tuning values are not universal and
+ *   must be validated from replay and physical logs.  Drag, attitude, and the
+ *   final deployment command intentionally remain outside this estimator.
  */
 
 #ifndef AMBAR_EKF_H
 #define AMBAR_EKF_H
-
-/*
- * ===================== AMBAR EKF PCB INTEGRATION - NEW FILE =====================
- *
- * This header is the plain-C interface for the vertical Extended Kalman Filter
- * added for the airbrake PCB firmware. It intentionally avoids C++ features,
- * heap allocation, and dynamic matrix libraries so the code is predictable in
- * the STM32CubeIDE C project.
- *
- * EKF state order:
- *   0: altitude above launch pad, meters
- *   1: vertical velocity, meters/second, positive upward
- *   2: accelerometer bias, meters/second^2
- *   3: barometer altitude bias, meters
- *
- * Sensor convention:
- *   The IMU input must already be converted into launch-frame vertical
- *   acceleration with gravity removed. The board/sensor layer owns that
- *   conversion because it depends on how the PCB is mounted in the rocket.
- */
 
 #ifdef __cplusplus
 extern "C" {
@@ -48,11 +41,16 @@ extern "C" {
 #include <stdbool.h>
 #include <stdint.h>
 
+/* ===================== UNITS AND DEFAULT MISSION TARGETS ===================== */
+
+/* Physical conversion constants and the default target used by flight config. */
 #define AMBAR_STANDARD_GRAVITY_MPS2 9.80665f
 #define AMBAR_FEET_TO_METERS        0.3048f
 #define AMBAR_METERS_TO_FEET        (1.0f / AMBAR_FEET_TO_METERS)
 #define AMBAR_TARGET_APOGEE_M       (3000.0f * AMBAR_FEET_TO_METERS)
 #define AMBAR_TARGET_TOLERANCE_M    (100.0f * AMBAR_FEET_TO_METERS)
+
+/* ===================== TUNING AND OUTPUT DATA ===================== */
 
 typedef struct
 {
@@ -124,6 +122,8 @@ typedef struct
     float last_barometer_innovation_sigma;
 } AmbarEstimatorHealth_t;
 
+/* ===================== CALLER-OWNED EKF RUNTIME STATE ===================== */
+
 typedef struct
 {
     /* Configuration copied in at init so the EKF can run without global constants. */
@@ -151,6 +151,9 @@ typedef struct
     float last_barometer_innovation_sigma;
 } AmbarEkf_t;
 
+/* ===================== PUBLIC API ===================== */
+
+/* First-pass noise/covariance values; tune from replay and physical logs. */
 AmbarEkfConfig_t AmbarEkf_DefaultConfig(void);
 
 /* Initialize a caller-owned EKF object.  Pass NULL config to use defaults. */

@@ -1,26 +1,24 @@
-/*
- * PROJECT FILE OVERVIEW
- * Comment made: 2026-07-07 17:44:48 -04:00
+/**
+ * @file radio_bridge.c
+ * @brief Tagged telemetry construction and cooperative SX1280 radio service.
  *
- * What this file does:
- *   This file builds telemetry packets and services radio receive and heartbeat work. It keeps raw sensor fields while adding EKF estimate, command, and health information.
+ * IMPLEMENTATION MAP
+ * ------------------
+ *  1. Small packing helpers append bounded little-endian fields.
+ *  2. PayloadPipelineWithFlight() assembles raw, flight, actuator, and text
+ *     sections, then starts a nonblocking transmission.
+ *  3. The EXTI callback only latches DIO1 and forwards unrelated board events.
+ *  4. RadioBridge_Task() completes TX, receives/parses commands, and schedules
+ *     an optional heartbeat.
  *
- * Process flow:
- *   Startup initializes the SX1280 and sends a boot message. Telemetry writes a header, raw sensor sections, calculated fields, EKF fields, and text messages into one packet. The task also handles incoming packets and heartbeats.
- *
- * Main variables and what can be changed:
- *   TAG values define packet sections and must match the receiver. Payload_FloatToS32 scaling controls fixed-point precision. Heartbeat timing can be reduced if needed.
- *
- * Assumptions:
- *   Packet length stays under SX1280_MAX_PAYLOAD_LEN, and the receiver knows tag meanings and little-endian integer format.
- *
- * What is missing:
- *   No robust command protocol, telemetry acknowledgements, or flash logging of radio failures is implemented.
+ * The packet tags and scales below are a wire-format contract.  Keep receiver
+ * changes synchronized with this file.  See CODE_GUIDE.md [ARCH-6].
  */
 
 #include "radio_bridge.h"
 #include "ambar_app.h"
 #include "ambar_actuator.h"
+#include "ambar_features.h"
 #include "rocket_sensors.h"
 #include "sx1280.h"
 #include <limits.h>
@@ -28,15 +26,9 @@
 #include <string.h>
 #include <stdio.h>
 
-/*
- * ===================== AMBAR EKF PCB INTEGRATION - UPDATED FILE =====================
- *
- * The original packet structure is preserved and expanded with three new tagged
- * fixed-point sections:
- *   0x60 = EKF estimate: altitude, velocity, acceleration, apogee, baro bias.
- *   0x61 = command: deploy fraction, predicted/target apogee, inhibit flags.
- *   0x62 = health: phase, healthy flag, rejected counts, last baro innovation.
- */
+/* -------------------------------------------------------------------------- */
+/* Cooperative radio state                                                     */
+/* -------------------------------------------------------------------------- */
 
 static volatile uint8_t radio_dio1_seen = 0;
 /*
@@ -44,12 +36,19 @@ static volatile uint8_t radio_dio1_seen = 0;
  * also checks the pin level directly so bring-up still works if EXTI routing is
  * not fully configured yet.
  */
+#if AMBAR_FEATURE_EFFECTIVE_HEARTBEAT
 static uint32_t last_heartbeat_ms = 0;
 /* Heartbeat counter proves STM32-to-LILYGO TX is alive even without RX traffic. */
 static uint32_t heartbeat_counter = 0;
+static uint32_t last_payload_tx_ms = 0;
+#endif
 static volatile uint8_t command_pending = 0U;
 static AmbarCommandResult_t pending_command;
 static AmbarCommandResult_t last_command;
+
+/* -------------------------------------------------------------------------- */
+/* Versioned telemetry wire format                                             */
+/* -------------------------------------------------------------------------- */
 
 #define PAYLOAD_MAGIC       0xA5
 #define PAYLOAD_VERSION     0x01
@@ -73,7 +72,7 @@ static AmbarCommandResult_t last_command;
 #define IMU_COUNT           6
 #define BARO_COUNT          2
 #define MAGNET_COUNT        3
-#define CALC_COUNT        	4
+#define CALC_COUNT          4
 #define MESSAGE_COUNT       3
 #define FLIGHT_ESTIMATE_COUNT 5
 #define FLIGHT_COMMAND_COUNT  5
@@ -86,7 +85,9 @@ static AmbarCommandResult_t last_command;
 
 static uint16_t payload_sequence = 0;
 
-// The following functions add to the buffer and shift
+/* -------------------------------------------------------------------------- */
+/* Bounded little-endian payload writers                                       */
+/* -------------------------------------------------------------------------- */
 
 static uint8_t Payload_CanAdd(uint8_t index, uint8_t needed)
 {
@@ -185,8 +186,6 @@ static uint8_t Payload_AddS32Array(uint8_t *buffer,
                                    uint8_t count)
 {
     /*
-     * BEGIN AMBAR EKF PCB INTEGRATION - SIGNED FIXED-POINT PACKING
-     *
      * EKF values can be negative, especially velocity, acceleration, bias, and
      * innovation.  They are packed little-endian as signed 32-bit two's-complement
      * fields, using the same byte writer as uint32_t after casting.
@@ -209,7 +208,6 @@ static uint8_t Payload_AddS32Array(uint8_t *buffer,
         index = Payload_AddU32(buffer, index, (uint32_t)data[i]);
     }
 
-    /* END AMBAR EKF PCB INTEGRATION - SIGNED FIXED-POINT PACKING */
     return index;
 }
 
@@ -296,7 +294,9 @@ static uint8_t Payload_AddString(uint8_t *buffer,
 
     return index;
 }
-// builds the payload
+/* -------------------------------------------------------------------------- */
+/* Telemetry packet assembly                                                   */
+/* -------------------------------------------------------------------------- */
 
 HAL_StatusTypeDef PayloadPipelineWithFlight(uint16_t *IMU,
                                             uint32_t *Baro,
@@ -309,8 +309,6 @@ HAL_StatusTypeDef PayloadPipelineWithFlight(uint16_t *IMU,
                                             const AmbarTelemetryExtra_t *Extra)
 {
     /*
-     * BEGIN AMBAR EKF PCB INTEGRATION - FLIGHT PAYLOAD ENTRY POINT
-     *
      * The old PayloadPipeline() wrapper still calls this function with Flight=0.
      * When a flight output is supplied, the new tagged sections are appended
      * after the original raw/calculated fields.
@@ -339,17 +337,9 @@ HAL_StatusTypeDef PayloadPipelineWithFlight(uint16_t *IMU,
     index = Payload_AddU8(txBuffer, index, PAYLOAD_VERSION);
     index = Payload_AddU8(txBuffer, index, PAYLOAD_TYPE_DATA);
     index = Payload_AddU16(txBuffer, index, payload_sequence++);
-    /*
-	 * Bytes 1-4: current time in milliseconds.
-	 */
-	index = Payload_AddU32(txBuffer, index, current_time_ms);
-
-	/*
-	 * Byte 5: deployment percentage.
-	 * 0 = fully retracted
-	 * 100 = fully deployed
-	 */
-	index = Payload_AddU8(txBuffer, index, deployment_state);
+    /* Timestamp and commanded deployment (0=retracted, 100=deployed). */
+    index = Payload_AddU32(txBuffer, index, current_time_ms);
+    index = Payload_AddU8(txBuffer, index, deployment_state);
 
     /*
      * Sensor data sections.
@@ -366,8 +356,6 @@ HAL_StatusTypeDef PayloadPipelineWithFlight(uint16_t *IMU,
     if (Flight != 0)
     {
         /*
-         * BEGIN AMBAR EKF PCB INTEGRATION - EKF TELEMETRY FIELDS
-         *
          * Scaling:
          *   meters, m/s, m/s^2, and bias use x100 -> centimeters-style precision.
          *   deploy_fraction uses x1000 -> 0.001 resolution.
@@ -410,14 +398,11 @@ HAL_StatusTypeDef PayloadPipelineWithFlight(uint16_t *IMU,
                                     TAG_FLIGHT_HEALTH,
                                     health_fields,
                                     FLIGHT_HEALTH_COUNT);
-        /* END AMBAR EKF PCB INTEGRATION - EKF TELEMETRY FIELDS */
     }
 
     if (Extra != 0)
     {
         /*
-         * BEGIN AMBAR BENCH-GATED EXPANSION - COMPATIBLE STATUS ADD-ONS
-         *
          * These tagged sections are appended after the existing fields.  Older
          * receivers can ignore unknown tags, while newer bench tools can decode
          * config, flash/log, actuator, TMC, and drag-predictor details.
@@ -458,7 +443,6 @@ HAL_StatusTypeDef PayloadPipelineWithFlight(uint16_t *IMU,
                                     TAG_APOGEE_DETAIL,
                                     apogee_fields,
                                     APOGEE_DETAIL_COUNT);
-        /* END AMBAR BENCH-GATED EXPANSION - COMPATIBLE STATUS ADD-ONS */
     }
 
     /*
@@ -479,8 +463,19 @@ HAL_StatusTypeDef PayloadPipelineWithFlight(uint16_t *IMU,
         return HAL_ERROR;
     }
 
-    /* END AMBAR EKF PCB INTEGRATION - FLIGHT PAYLOAD ENTRY POINT */
-    return SX1280_Transmit(txBuffer, index, 1000);
+    /*
+     * Full telemetry can occupy about 198 ms at the configured SF7/BW.  Load
+     * the FIFO and start TX here, then let RadioBridge_Task service TX_DONE so
+     * the sensor/EKF scheduler is not stalled for the packet's full airtime.
+     */
+    HAL_StatusTypeDef status = SX1280_StartTransmit(txBuffer, index, 1000U);
+#if AMBAR_FEATURE_EFFECTIVE_HEARTBEAT
+    if (status == HAL_OK)
+    {
+        last_payload_tx_ms = HAL_GetTick();
+    }
+#endif
+    return status;
 }
 
 HAL_StatusTypeDef PayloadPipeline(uint16_t *IMU,
@@ -501,10 +496,10 @@ HAL_StatusTypeDef PayloadPipeline(uint16_t *IMU,
                                      0);
 }
 
-/*
- * If you already have HAL_GPIO_EXTI_Callback() somewhere else,
- * merge this logic into the existing callback instead of defining it twice.
- */
+/* -------------------------------------------------------------------------- */
+/* Interrupt fan-out and public radio service                                  */
+/* -------------------------------------------------------------------------- */
+
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
     /*
@@ -535,9 +530,18 @@ HAL_StatusTypeDef RadioBridge_Init(void)
      * Send a boot message so the LILYGO can confirm STM32 -> LILYGO works.
      */
     const char boot_msg[] = "STM32_BOOT";
-    SX1280_Transmit((const uint8_t *)boot_msg, (uint8_t)strlen(boot_msg), 1000);
+    status = SX1280_Transmit((const uint8_t *)boot_msg,
+                             (uint8_t)strlen(boot_msg),
+                             1000U);
+    if (status != HAL_OK)
+    {
+        return status;
+    }
 
+#if AMBAR_FEATURE_EFFECTIVE_HEARTBEAT
     last_heartbeat_ms = HAL_GetTick();
+    last_payload_tx_ms = last_heartbeat_ms;
+#endif
 
     return HAL_OK;
 }
@@ -584,8 +588,21 @@ void RadioBridge_Task(void)
      * This task is intentionally nonblocking.  It handles incoming packets if
      * present and emits an occasional heartbeat, then returns to the EKF scheduler.
      */
-    uint8_t payload[SX1280_MAX_PAYLOAD_LEN + 1];
+    static uint8_t payload[SX1280_MAX_PAYLOAD_LEN + 1];
     uint8_t payload_len = 0;
+    HAL_StatusTypeDef tx_status = SX1280_ServiceTransmit();
+
+    /* The modem cannot receive while a packet is on air; return immediately. */
+    if (tx_status == HAL_BUSY)
+    {
+        return;
+    }
+
+    if (tx_status != HAL_OK)
+    {
+        /* ServiceTransmit has already attempted recovery into continuous RX. */
+        radio_dio1_seen = 0U;
+    }
 
     /*
      * This handles both cases:
@@ -602,8 +619,6 @@ void RadioBridge_Task(void)
             payload[payload_len] = '\0';
 
             /*
-             * BEGIN AMBAR BENCH-GATED EXPANSION - COMMAND PARSE
-             *
              * The bridge parses the packet and stores the result for the app.
              * The app then performs the safety-checked action and sends a short
              * response.  Parser errors are still reported immediately.
@@ -620,7 +635,8 @@ void RadioBridge_Task(void)
                 last_command = parsed;
                 (void)RadioBridge_SendText(parsed.response);
             }
-            /* END AMBAR BENCH-GATED EXPANSION - COMMAND PARSE */
+            /* Give the app immediate, uncontested ownership of valid-command ACK. */
+            return;
         }
     }
 
@@ -628,16 +644,22 @@ void RadioBridge_Task(void)
      * Optional heartbeat proves STM32 -> LILYGO transmit works even before
      * the LILYGO sends anything.
      */
-    if ((HAL_GetTick() - last_heartbeat_ms) >= 5000)
+#if AMBAR_FEATURE_EFFECTIVE_HEARTBEAT
+    const uint32_t now = HAL_GetTick();
+    if (((uint32_t)(now - last_heartbeat_ms) >= 5000U) &&
+        ((uint32_t)(now - last_payload_tx_ms) >= 5000U))
     {
-        last_heartbeat_ms = HAL_GetTick();
+        last_heartbeat_ms = now;
 
         char msg[48];
         int n = snprintf(msg, sizeof(msg), "STM32_HEARTBEAT_%lu", heartbeat_counter++);
 
         if (n > 0)
         {
-            SX1280_Transmit((const uint8_t *)msg, (uint8_t)n, 1000);
+            (void)SX1280_StartTransmit((const uint8_t *)msg,
+                                       (uint8_t)n,
+                                       1000U);
         }
     }
+#endif
 }

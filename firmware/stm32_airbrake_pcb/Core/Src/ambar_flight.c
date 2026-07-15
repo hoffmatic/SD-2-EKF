@@ -1,36 +1,51 @@
 /*
- * PROJECT FILE OVERVIEW
- * Comment made: 2026-07-07 17:44:48 -04:00
+ * AMBAR FLIGHT ESTIMATION AND DEPLOYMENT POLICY - IMPLEMENTATION
  *
- * What this file does:
- *   This file connects the EKF estimate to airbrake decision logic. It decides the current flight phase and calculates airbrake deployment fraction, but it does not move the motor.
+ * Purpose
+ *   Combines the vertical EKF, flight-phase state machine, forward apogee
+ *   prediction, explicit arming, and airbrake command policy.  This module
+ *   produces a requested deploy_fraction and inhibit explanation; it never
+ *   enables the motor driver or writes a TMC5240 register.
  *
- * Process flow:
- *   IMU updates advance the EKF and phase machine. Barometer updates correct altitude. The output builder reads the latest estimate, health, and phase, then computes command and inhibit flags.
+ * Data/control flow
+ *   IMU updates propagate the EKF and advance PAD_IDLE -> BOOST -> COAST ->
+ *   AIRBRAKE_ACTIVE -> RECOVERY.  Barometer updates correct the EKF at their
+ *   own rate.  GetOutput selects ballistic or drag-aware apogee, evaluates all
+ *   deployment gates, and returns one telemetry/control snapshot.  AmbarApp
+ *   passes that request to AmbarActuator, which applies the independent hardware
+ *   safety gates described in CODE_GUIDE.md [ARCH-4] and [ARCH-5].
  *
- * Main variables and what can be changed:
- *   Default phase and controller thresholds can be changed after simulation, ground testing, and replay. full_deployment_error_m controls how strongly apogee error becomes deployment.
+ * Section map
+ *   1. Configuration constant and singleton runtime state
+ *   2. Phase-machine helpers
+ *   3. Ballistic and drag-aware apogee predictors
+ *   4. Command policy and output assembly
+ *   5. Defaults and lifecycle
+ *   6. Sensor-update and snapshot API
  *
- * Assumptions:
- *   The rocket starts on the pad. Thresholds are good enough for first pass testing but need real validation.
- *
- * What is missing:
- *   No arming state, recovery integration, drag compensation, or final tuned controller gains are included yet.
+ * Safety and assumptions
+ *   Deployment is authorized only while armed, healthy, ascending, sufficiently
+ *   high/late, and in coast.  Any inhibit produces a zero request.  Default
+ *   thresholds, vehicle mass, drag area, air density, and effectiveness are
+ *   first-pass replay values, not flight-qualified measurements.  The predictor
+ *   is vertical-only and does not model attitude, wind, or changing atmosphere.
  */
 
 #include "ambar_flight.h"
-
-/*
- * ===================== AMBAR EKF PCB INTEGRATION - NEW FILE =====================
- *
- * This module connects the estimator to airbrake decision logic. It does not
- * move the motor. It only decides what the desired deployment fraction would be
- * and explains why deployment is inhibited.
- */
+#include "ambar_features.h"
 
 #include <stddef.h>
 #include <string.h>
 #include <math.h>
+
+/* ===================== CONFIGURATION AND MODULE STATE ===================== */
+
+/*
+ * A single radio/scheduler stall can make one IMU timestamp exceed the EKF
+ * gate.  Keep that sample rejected and the command inhibited, but only latch
+ * the phase machine into FAULT after a sustained IMU outage.
+ */
+#define AMBAR_PHASE_FAULT_CONSECUTIVE_IMU_REJECTIONS 10U
 
 typedef struct
 {
@@ -45,10 +60,9 @@ typedef struct
 
     /* Latest sensor timestamp seen by the flight layer. */
     float latest_timestamp_s;
+    uint32_t consecutive_imu_rejections;
 
     /*
-     * BEGIN AMBAR BENCH-GATED EXPANSION - RADIO ARMING STATE
-     *
      * Arming is intentionally separate from phase tracking.  The estimator can
      * detect launch and coast while the airbrake command remains inhibited until
      * an explicit ARM command is accepted.
@@ -56,10 +70,11 @@ typedef struct
     bool armed;
     float last_ballistic_apogee_m;
     float last_drag_apogee_m;
-    /* END AMBAR BENCH-GATED EXPANSION - RADIO ARMING STATE */
 } AmbarFlightComputer_t;
 
 static AmbarFlightComputer_t s_flight;
+
+/* ===================== PHASE-MACHINE HELPERS ===================== */
 
 static float ambar_clamp(float value, float lower, float upper)
 {
@@ -83,12 +98,24 @@ static void ambar_phase_reset(void)
     s_flight.phase = AMBAR_PHASE_PAD_IDLE;
     s_flight.launch_timestamp_s = 0.0f;
     s_flight.has_launch_timestamp = false;
+    s_flight.consecutive_imu_rejections = 0U;
 }
 
 static void ambar_phase_update(float timestamp_s,
                                const AmbarNavigationEstimate_t *estimate,
                                float vertical_acceleration_mps2)
 {
+#if AMBAR_FEATURE_AUTO_FLIGHT_PHASES == 0
+    /* Presentation mode: estimator runs, but no sensor transient can leave pad. */
+    (void)timestamp_s;
+    (void)estimate;
+    (void)vertical_acceleration_mps2;
+    s_flight.phase = AMBAR_PHASE_PAD_IDLE;
+    s_flight.launch_timestamp_s = 0.0f;
+    s_flight.has_launch_timestamp = false;
+    return;
+#endif
+
     if (estimate == NULL)
     {
         return;
@@ -146,6 +173,8 @@ static void ambar_phase_update(float timestamp_s,
     }
 }
 
+/* ===================== APOGEE PREDICTORS ===================== */
+
 static float ambar_ballistic_apogee(float altitude_m, float velocity_mps)
 {
     /*
@@ -166,8 +195,6 @@ static float ambar_drag_apogee(float altitude_m,
                                const AmbarApogeePredictorConfig_t *config)
 {
     /*
-     * BEGIN AMBAR BENCH-GATED EXPANSION - DRAG-AWARE APOGEE PREDICTOR
-     *
      * This is intentionally still a vertical-only coast predictor.  It numerically
      * steps upward velocity until the vehicle stops rising:
      *   acceleration = -gravity - k * velocity^2
@@ -225,7 +252,6 @@ static float ambar_drag_apogee(float altitude_m,
     }
 
     return altitude;
-    /* END AMBAR BENCH-GATED EXPANSION - DRAG-AWARE APOGEE PREDICTOR */
 }
 
 static float ambar_selected_apogee(const AmbarNavigationEstimate_t *estimate)
@@ -250,6 +276,8 @@ static float ambar_selected_apogee(const AmbarNavigationEstimate_t *estimate)
 
     return s_flight.last_ballistic_apogee_m;
 }
+
+/* ===================== COMMAND POLICY AND OUTPUT ASSEMBLY ===================== */
 
 static AmbarAirbrakeCommand_t ambar_compute_command(const AmbarNavigationEstimate_t *estimate)
 {
@@ -364,6 +392,8 @@ static AmbarFlightOutput_t ambar_build_output(void)
     return output;
 }
 
+/* ===================== DEFAULTS AND LIFECYCLE ===================== */
+
 AmbarFlightConfig_t AmbarFlight_DefaultConfig(void)
 {
     /*
@@ -389,8 +419,6 @@ AmbarFlightConfig_t AmbarFlight_DefaultConfig(void)
     config.controller.minimum_flight_time_s = 1.0f;
 
     /*
-     * BEGIN AMBAR BENCH-GATED EXPANSION - DEFAULT DRAG TUNING
-     *
      * These are placeholders for replay and bench tuning.  The mode defaults to
      * drag because this pass is meant to expose the predictor, but the values are
      * conservative and must be replaced with measured vehicle data.
@@ -402,7 +430,6 @@ AmbarFlightConfig_t AmbarFlight_DefaultConfig(void)
     config.apogee.time_step_s = 0.02f;
     config.apogee.max_predict_time_s = 30.0f;
     config.apogee.actuator_effectiveness = 1.0f;
-    /* END AMBAR BENCH-GATED EXPANSION - DEFAULT DRAG TUNING */
 
     return config;
 }
@@ -440,6 +467,8 @@ bool AmbarFlight_IsArmed(void)
     return s_flight.armed;
 }
 
+/* ===================== SENSOR UPDATES AND OUTPUT API ===================== */
+
 bool AmbarFlight_UpdateImu(float timestamp_s, float vertical_acceleration_mps2)
 {
     /*
@@ -451,6 +480,33 @@ bool AmbarFlight_UpdateImu(float timestamp_s, float vertical_acceleration_mps2)
     const bool propagated =
         AmbarEkf_PropagateImu(&s_flight.ekf, timestamp_s, vertical_acceleration_mps2);
 
+    if (!propagated)
+    {
+        if (s_flight.consecutive_imu_rejections <
+            AMBAR_PHASE_FAULT_CONSECUTIVE_IMU_REJECTIONS)
+        {
+            ++s_flight.consecutive_imu_rejections;
+        }
+
+        /*
+         * The EKF already marks this sample unhealthy, so all actuator output is
+         * inhibited immediately.  Delay only the permanent phase latch so one
+         * recoverable timing/sensor miss cannot strand the system in FAULT.
+         */
+        if (s_flight.consecutive_imu_rejections >=
+            AMBAR_PHASE_FAULT_CONSECUTIVE_IMU_REJECTIONS)
+        {
+            AmbarNavigationEstimate_t failed_estimate =
+                AmbarEkf_GetEstimate(&s_flight.ekf);
+            ambar_phase_update(timestamp_s,
+                               &failed_estimate,
+                               vertical_acceleration_mps2);
+        }
+
+        return false;
+    }
+
+    s_flight.consecutive_imu_rejections = 0U;
     AmbarNavigationEstimate_t estimate = AmbarEkf_GetEstimate(&s_flight.ekf);
     ambar_phase_update(timestamp_s, &estimate, vertical_acceleration_mps2);
 
@@ -475,11 +531,13 @@ bool AmbarFlight_UpdateBarometer(float barometer_altitude_agl_m, float barometer
 
 AmbarFlightOutput_t AmbarFlight_GetOutput(void)
 {
+    /* Copy the latest decision state; this call does not advance the estimator. */
     return ambar_build_output();
 }
 
 const char *AmbarFlight_PhaseName(AmbarFlightPhase_t phase)
 {
+    /* Stable labels used by logs and operator-facing telemetry. */
     switch (phase)
     {
     case AMBAR_PHASE_PAD_IDLE:

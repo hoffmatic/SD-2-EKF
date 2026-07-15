@@ -1,38 +1,26 @@
-/*
- * PROJECT FILE OVERVIEW
- * Comment made: 2026-07-07 17:44:48 -04:00
+/**
+ * @file lis2mdl.c
+ * @brief Polling I2C3 implementation for LIS2MDL health and raw telemetry.
  *
- * What this file does:
- *   This file reads and configures the LIS2MDL magnetometer over I2C3 for health checks and telemetry.
- *
- * Process flow:
- *   The driver confirms the chip answers, checks WHO_AM_I, configures continuous conversion, then reads six output bytes for X, Y, and Z raw magnetic counts.
- *
- * Main variables and what can be changed:
- *   The configuration bytes in LIS2MDL_Init can be changed for data rate, filtering, or interrupt behavior after magnetometer testing.
- *
- * Assumptions:
- *   Raw counts are enough for first-board bring-up. The EKF does not depend on magnetic readings.
- *
- * What is missing:
- *   No hard-iron or soft-iron calibration, heading output, or flight-loop use exists yet.
+ * Sections: common bus helpers -> identity/status -> initialization -> sample
+ * readout.  The file contains no estimator or calibration policy.  See
+ * CODE_GUIDE.md [ARCH-2].
  */
 
 #include "lis2mdl.h"
 
-/*
- * LIS2MDL low-level I2C driver.
- *
- * This driver is intentionally simple because the magnetometer is health and
- * telemetry only in the first EKF build.  The key requirement is to keep any
- * LIS2MDL failure visible without blocking the IMU/barometer vertical estimator.
- */
+/* -------------------------------------------------------------------------- */
+/* Bus configuration and private register helpers                             */
+/* -------------------------------------------------------------------------- */
 
 #define LIS2MDL_I2C_TIMEOUT_MS       100U
 #define LIS2MDL_ADDR(dev)            ((uint16_t)((dev)->addr_7bit << 1))
 #define LIS2MDL_AUTO_INC             0x80U
 
-static HAL_StatusTypeDef lis2mdl_write_u8(LIS2MDL_HandleTypeDef *dev, uint8_t reg, uint8_t value)
+static HAL_StatusTypeDef lis2mdl_write_u8(
+    LIS2MDL_HandleTypeDef *dev,
+    uint8_t reg,
+    uint8_t value)
 {
     /* Shared byte-write helper keeps all LIS2MDL register access consistent. */
     if (dev == NULL || dev->hi2c == NULL)
@@ -49,7 +37,10 @@ static HAL_StatusTypeDef lis2mdl_write_u8(LIS2MDL_HandleTypeDef *dev, uint8_t re
                              LIS2MDL_I2C_TIMEOUT_MS);
 }
 
-static HAL_StatusTypeDef lis2mdl_read_u8(LIS2MDL_HandleTypeDef *dev, uint8_t reg, uint8_t *value)
+static HAL_StatusTypeDef lis2mdl_read_u8(
+    LIS2MDL_HandleTypeDef *dev,
+    uint8_t reg,
+    uint8_t *value)
 {
     /* Single-byte reads are enough for WHO_AM_I and STATUS diagnostics. */
     if (dev == NULL || dev->hi2c == NULL || value == NULL)
@@ -66,7 +57,11 @@ static HAL_StatusTypeDef lis2mdl_read_u8(LIS2MDL_HandleTypeDef *dev, uint8_t reg
                             LIS2MDL_I2C_TIMEOUT_MS);
 }
 
-static HAL_StatusTypeDef lis2mdl_read_bytes_auto_inc(LIS2MDL_HandleTypeDef *dev, uint8_t start_reg, uint8_t *buffer, uint16_t len)
+static HAL_StatusTypeDef lis2mdl_read_bytes_auto_inc(
+    LIS2MDL_HandleTypeDef *dev,
+    uint8_t start_reg,
+    uint8_t *buffer,
+    uint16_t len)
 {
     /*
      * LIS2MDL uses bit 7 of the sub-address to auto-increment.  Without that
@@ -77,7 +72,6 @@ static HAL_StatusTypeDef lis2mdl_read_bytes_auto_inc(LIS2MDL_HandleTypeDef *dev,
         return HAL_ERROR;
     }
 
-    // For LIS2MDL, the MSB of the subaddress enables auto-increment during multiple-byte reads.
     return HAL_I2C_Mem_Read(dev->hi2c,
                             LIS2MDL_ADDR(dev),
                             (uint8_t)(start_reg | LIS2MDL_AUTO_INC),
@@ -128,16 +122,15 @@ HAL_StatusTypeDef LIS2MDL_Init(LIS2MDL_HandleTypeDef *dev)
         return HAL_ERROR;
     }
 
-    // CFG_REG_A:
-    // COMP_TEMP_EN=1, high-resolution mode, ODR=100 Hz, continuous-conversion mode.
+    /* CFG_REG_A: temperature compensation, high resolution, 100 Hz, continuous. */
     status = lis2mdl_write_u8(dev, LIS2MDL_CFG_REG_A, 0x8CU);
     if (status != HAL_OK) { return status; }
 
-    // CFG_REG_B: enable offset cancellation. Keep LPF disabled for simpler raw response.
+    /* CFG_REG_B: offset cancellation on; LPF off for an unsmoothed raw response. */
     status = lis2mdl_write_u8(dev, LIS2MDL_CFG_REG_B, 0x02U);
     if (status != HAL_OK) { return status; }
 
-    // CFG_REG_C: BDU=1. Do not route DRDY to INT pin by default.
+    /* CFG_REG_C: block-data update on; DRDY is not routed to an interrupt pin. */
     status = lis2mdl_write_u8(dev, LIS2MDL_CFG_REG_C, 0x10U);
     if (status != HAL_OK) { return status; }
 
@@ -145,7 +138,9 @@ HAL_StatusTypeDef LIS2MDL_Init(LIS2MDL_HandleTypeDef *dev)
     return HAL_OK;
 }
 
-HAL_StatusTypeDef LIS2MDL_ReadData(LIS2MDL_HandleTypeDef *dev, int16_t data[LIS2MDL_DATA_COUNT])
+HAL_StatusTypeDef LIS2MDL_ReadData(
+    LIS2MDL_HandleTypeDef *dev,
+    int16_t data[LIS2MDL_DATA_COUNT])
 {
     /*
      * The output registers are little-endian X/Y/Z magnetic readings.  They are
