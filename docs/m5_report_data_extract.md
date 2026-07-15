@@ -125,12 +125,12 @@ measurements.
 After applying the June 14 launch conditions and stabilizing-fin geometry, the
 provisional RocketPy model reports:
 
-- Passive apogee: 3851 ft versus 3379 ft in the report, a +14.0% mismatch.
+- Passive apogee: 3829 ft AGL versus 3379 ft AGL in the report, a +13.3% mismatch.
 - Rail exit: 42.7 ft/s versus the 52 ft/s requirement and 75.5 ft/s report
   result.
 - Maximum Mach: 0.494 versus 0.509 in the report.
-- Closed-loop apogee: 2973 ft, but this is not a validated target result because
-  the passive vehicle model fails its source comparison.
+- Production-STM32-C closed-loop apogee: 3327 ft AGL (+327 ft target error),
+  and the passive vehicle model also fails its source comparison.
 
 The passive-reference and rail-exit tests therefore fail. This is the intended
 behavior until the OpenRocket configuration is rerun and the mass properties

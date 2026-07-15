@@ -41,11 +41,11 @@ const baselineData = {
     rocketpy: {
       overall: "FAIL",
       scenarios: [
-        scenario("M5 passive reference", "FAIL", "RocketPy runs the June 2 OpenRocket geometry and June 14 M5 launch conditions with the selected AeroTech J420R and no airbrake deployment.", "RocketPy completes and passive apogee remains within 10% of the current 3379 ft M5 OpenRocket value.", "The provisional model predicts 3851 ft, 14.0% above the current report value.", { "RocketPy passive apogee": "3851 ft", "M5 OpenRocket apogee": "3379 ft", "difference": "+14.0%", "maximum Mach": "0.494", "rail exit velocity": "42.7 ft/s" }, "FAIL is intentional: current mass, CG, inertia, and drag data are unresolved, so the model was not retuned to force agreement."),
-        scenario("C++ closed-loop airbrakes", "PASS", "RocketPy feeds delayed, noisy virtual IMU/barometer measurements into the real C++ AMBAR flight computer and applies its rate-limited airbrake command.", "The estimator stays healthy, commands remain bounded, deployment begins after burnout plus margin, commands occur only in AirbrakeActive, and apogee is reduced by more than 50 ft.", "The controller reduced this provisional trajectory from 3851 ft to 2973 ft without commanding before the post-burn enable time.", { "closed-loop apogee": "2973 ft", "target error": "-27 ft", "apogee reduction": "879 ft", "motor burn end": "1.64 s", "minimum deploy time": "1.74 s", "first C++ command": "1.82 s", "C++ command range": "0.0% to 100.0%", "maximum altitude error": "3.64 m", "maximum velocity error": "6.54 m/s", "estimator healthy": "yes" }, "Controller coupling passed, but target accuracy is not validated because the passive vehicle model failed its source comparison."),
-        scenario("closed-loop target attainment", "PASS", "The provisional closed-loop apogee is compared directly with 3000 +/-100 ft.", "Closed-loop apogee is between 2900 ft and 3100 ft.", "The provisional result is inside the band, but source-model failures prevent a validation claim.", { "closed-loop apogee": "2973 ft", "target error": "-27 ft" }, "This is a necessary target-band check, not sufficient validation."),
+        scenario("M5 passive reference", "FAIL", "RocketPy runs the June 2 OpenRocket geometry and June 14 M5 launch conditions with the selected AeroTech J420R and no airbrake deployment.", "RocketPy completes and passive apogee remains within 10% of the current 3379 ft M5 OpenRocket value.", "The provisional model predicts 3829 ft AGL, 13.3% above the current report value.", { "RocketPy passive apogee": "3829 ft AGL", "M5 OpenRocket apogee": "3379 ft AGL", "difference": "+13.3%", "maximum Mach": "0.494", "rail exit velocity": "42.7 ft/s" }, "FAIL is intentional: current mass, CG, inertia, and drag data are unresolved, so the model was not retuned to force agreement."),
+        scenario("STM32-C closed-loop airbrakes", "PASS", "RocketPy feeds a pad-referenced body-axis IMU channel and delayed/noisy barometer measurements into the production STM32-C EKF/flight modules, then applies the delayed, rate-limited airbrake command.", "The estimator stays healthy, commands remain bounded, no command occurs before true burnout plus margin, commands occur only in Coast/AirbrakeActive, and apogee is reduced by more than 10 ft.", "The controller reduced this provisional trajectory from 3829 ft to 3327 ft without commanding before the true post-burn enable time.", { "closed-loop apogee": "3327 ft AGL", "target error": "+327 ft", "apogee reduction": "502 ft", "motor burn end": "1.64 s", "safety enable time": "1.74 s", "first STM32-C command": "4.42 s", "first virtual motion": "4.52 s", "maximum altitude error": "3.60 m", "maximum velocity error": "6.54 m/s", "estimator healthy": "yes" }, "Controller coupling passed, but target accuracy is not validated because the passive vehicle model failed its source comparison."),
+        scenario("closed-loop target attainment", "FAIL", "The provisional closed-loop apogee is compared directly with 3000 +/-100 ft AGL.", "Closed-loop apogee is between 2900 ft and 3100 ft.", "The current production-controller result is above the target band.", { "closed-loop apogee": "3327 ft AGL", "target error": "+327 ft" }, "This fails even before accounting for unresolved source-model calibration."),
         scenario("M5 flight envelope checks", "FAIL", "The closed-loop RocketPy trajectory is checked against the M5 subsonic and minimum rail-exit requirements.", "Maximum Mach is no greater than 1.0 and rail-exit velocity is at least 52 ft/s.", "The trajectory stayed subsonic but left the 72-inch rail too slowly.", { "maximum Mach": "0.494", "Mach limit": "1.0", "minimum rail exit velocity": "42.7 ft/s", "rail exit minimum": "52.0 ft/s", "M5 reported rail exit velocity": "75.5 ft/s" }),
-        scenario("flight-data integrity and recovery observation", "PASS", "The structured log is checked through a short post-apogee controller observation window.", "Timestamps and values remain valid, Recovery is observed, barometer samples are sparse, and deployment retracts below 2%.", "The time history passed its integrity checks and showed PadIdle, Boost, AirbrakeActive, and Recovery.", { "controller samples": "1727", "barometer samples": "864", "final deployment": "0.0%", "integrity errors": "0" }, "Parachutes, recovery electronics, landing, and deployment loads are not modeled.")
+        scenario("flight-data integrity and recovery observation", "PASS", "The structured log is checked through a short post-apogee controller observation window.", "Timestamps and values remain valid, Recovery is observed, barometer samples are sparse, and deployment retracts below 2%.", "The time history passed its integrity checks and showed PadIdle, Boost, Coast, AirbrakeActive, and Recovery.", { "controller samples": "1728", "barometer samples": "864", "final deployment": "0.0%", "integrity errors": "0" }, "Parachutes, recovery electronics, landing, and deployment loads are not modeled.")
       ]
     },
     electronics: {
@@ -167,7 +167,7 @@ function renderSummary() {
     ? "Experimental inputs"
     : state.data.mode === "live" ? "Live local run" : "Baseline snapshot";
   el("summary-subtitle").textContent = state.data.mode === "live"
-    ? "Results parsed from the local C++ sandboxes and RocketPy physics backend."
+    ? "Results parsed from the local legacy C++ sandboxes and production STM32-C/RocketPy backend."
     : "Reviewed baseline results. Run the suite to refresh from the local executables.";
 }
 
@@ -276,7 +276,7 @@ function renderInspector() {
 
 function whatThisProves(suite, item) {
   if (suite === "flight") return `This verifies the estimator/controller response for the injected virtual condition. It does not prove the aerodynamic model or final apogee accuracy. ${item.result}`;
-  if (suite === "rocketpy") return `This verifies RocketPy-to-C++ closed-loop integration using the versioned M5 reference model. Final prediction accuracy still depends on measured mass properties and aerodynamic data. ${item.result}`;
+  if (suite === "rocketpy") return `This verifies RocketPy-to-production-STM32-C closed-loop integration using the versioned M5 reference model. Final prediction accuracy still depends on measured mass properties and aerodynamic data. ${item.result}`;
   if (suite === "electronics") return `This verifies the modeled boot-decision logic and constant checks. It does not measure the physical PCB, power integrity, or bus waveforms. ${item.result}`;
   return `This verifies the virtual actuator safety behavior using the current model. Final motor torque, current, travel, and timing still require bench measurements. ${item.result}`;
 }
@@ -311,14 +311,14 @@ function flightChartDefinitions(data) {
     {
       id: "altitude",
       title: "Altitude and predicted apogee",
-      subtitle: "RocketPy truth, sparse barometer samples, C++ EKF estimate, and controller prediction",
+      subtitle: "RocketPy truth, sparse barometer samples, STM32-C EKF estimate, and controller prediction",
       unit: "ft AGL",
       includeZero: true,
       times,
       series: [
         series("RocketPy truth", "#175cd3", log.map((sample) => sample.truth_altitude_m * METERS_TO_FEET)),
         series("Barometer sample", "#b54708", log.map((sample) => sample.measured_altitude_m == null ? null : sample.measured_altitude_m * METERS_TO_FEET), { pointsOnly: true }),
-        series("C++ EKF estimate", "#067647", log.map((sample) => sample.estimated_altitude_m * METERS_TO_FEET)),
+        series("STM32-C EKF estimate", "#067647", log.map((sample) => sample.estimated_altitude_m * METERS_TO_FEET)),
         series("Predicted apogee", "#6941c6", log.map((sample) => sample.predicted_apogee_m * METERS_TO_FEET), { dash: [5, 4] }),
         series("Mission target", "#b42318", log.map(() => targetFt), { dash: [2, 4] })
       ]
@@ -339,13 +339,13 @@ function flightChartDefinitions(data) {
     {
       id: "acceleration",
       title: "Vertical acceleration",
-      subtitle: "Launch-frame net acceleration after assumed alignment and gravity compensation, not raw body-axis IMU data",
+      subtitle: "World-vertical truth compared with the pad-referenced body-axis virtual IMU channel supplied to firmware",
       unit: "ft/s^2",
       includeZero: true,
       times,
       series: [
         series("RocketPy vertical truth", "#175cd3", log.map((sample) => sample.truth_acceleration_mps2 * METERS_TO_FEET)),
-        series("Virtual sensor supplied to C++", "#b54708", log.map((sample) => sample.measured_acceleration_mps2 * METERS_TO_FEET))
+        series("Virtual sensor supplied to STM32-C", "#b54708", log.map((sample) => sample.measured_acceleration_mps2 * METERS_TO_FEET))
       ]
     },
     {
@@ -357,7 +357,7 @@ function flightChartDefinitions(data) {
       fixedMaximum: 100,
       times,
       series: [
-        series("C++ command", "#b54708", log.map((sample) => sample.command_fraction * 100), { dash: [5, 4] }),
+        series("STM32-C command", "#b54708", log.map((sample) => sample.command_fraction * 100), { dash: [5, 4] }),
         series("Applied deployment", "#175cd3", log.map((sample) => sample.actual_deployment_fraction * 100))
       ]
     }
@@ -392,7 +392,7 @@ function renderFlightData() {
   container.innerHTML = `
     <header class="flight-data-heading">
       <div>
-        <div class="flight-data-kicker">RocketPy + C++ closed loop</div>
+        <div class="flight-data-kicker">RocketPy + production STM32-C closed loop</div>
         <h1>Flight Time History</h1>
         <p>Follow the simulated vehicle from pad through boost, controlled coast, apogee, Recovery entry, and airbrake retraction.</p>
       </div>
@@ -416,7 +416,7 @@ function renderFlightData() {
     <section class="data-key">
       <div><strong>Truth</strong><span>RocketPy trajectory and aerodynamic response.</span></div>
       <div><strong>Sensor</strong><span>Delayed, biased, noisy, and quantized virtual measurements.</span></div>
-      <div><strong>Estimate</strong><span>Output from the repository's C++ vertical EKF.</span></div>
+      <div><strong>Estimate</strong><span>Output from the production STM32-C vertical EKF.</span></div>
     </section>
     <section class="flight-chart-grid">
       ${chartDefinitions.map((definition) => `
@@ -430,7 +430,7 @@ function renderFlightData() {
         </article>`).join("")}
     </section>
     <section class="phase-panel">
-      <header><h2>Flight phase timeline</h2><p>Phase names come from the real C++ flight-phase tracker, not from UI inference.</p></header>
+      <header><h2>Flight phase timeline</h2><p>Phase names come from production STM32-C flight logic, not from UI inference.</p></header>
       <div class="phase-strip">${transitions.map((transition, index) => {
         const endTime = transitions[index + 1]?.time_s ?? log.at(-1).time_s;
         const duration = Math.max(0.01, endTime - transition.time_s);
@@ -757,14 +757,14 @@ function renderSources() {
         ["June 14 M5 report", "3379 ft passive apogee, 579 ft/s maximum velocity, 75.5 ft/s rail exit, launch conditions, fin geometry, airbrake loads, and 430 mA logic budget", "EXTRACTED", "status-pass"],
         ["M5 project requirements", "3000 ft target, ±100 ft tolerance, 2.4 GHz radio, J420R motor selection, and separate recovery GPS", "IN CODE", "status-pass"],
         ["KiCad hardware map", "STM32H562, BMP388, LSM6DSV32X, LIS2MDL, SX1280, W25Q64, TMC5240", "LOCAL SOURCE", "status-pass"],
-        ["RocketPy physics", "RocketPy 1.12.1, certified J420R thrust curve, standard pressure/temperature, constant M5 wind, provisional sensor errors, and real C++ controller bridge", "IN CODE", "status-pass"],
+        ["RocketPy physics", "RocketPy 1.12.1, certified J420R thrust curve, standard pressure/temperature, constant M5 wind, provisional sensor errors, and production STM32-C controller bridge", "IN CODE", "status-pass"],
         ["Sensor architecture", "Airbrake board uses magnetometer; recovery/tracking GPS is an independent subsystem", "VERIFIED", "status-pass"]
       ]
     },
     {
       title: "Open engineering inputs",
       rows: [
-        ["OpenRocket reconstruction", "The current .ork geometry is applied, but the selected configuration must be rerun and measured mass properties/drag are needed to resolve 3851 ft versus 3379 ft", "FAILING", "status-warn"],
+        ["OpenRocket reconstruction", "The current .ork geometry is applied, but the selected configuration must be rerun and measured mass properties/drag are needed to resolve 3829 ft AGL versus 3379 ft AGL", "FAILING", "status-warn"],
         ["Aerodynamic calibration", "Drag versus Mach/deployment with a declared reference area", "PROVISIONAL", "status-warn"],
         ["Mass properties", "Measured flight-ready mass, center of gravity, and inertia", "PLACEHOLDER", "status-warn"],
         ["Actuator calibration", "Final step/mm, current limit, homing switch, friction, and stall threshold", "PLACEHOLDER", "status-warn"],

@@ -17,8 +17,13 @@ jobs:
       - name: Build native targets
         run: cmake --build build --config Release --parallel
 
-      - name: Run C++ tests and deterministic sandboxes
+      - name: Run native and STM32-C host tests
         run: ctest --test-dir build --build-config Release --output-on-failure
+
+      - name: Run Python USB and replay host tests
+        run: |
+          python3 -m unittest discover -s firmware/stm32_airbrake_pcb/HostTests -p "test_*.py"
+          python3 firmware/stm32_airbrake_pcb/HostTests/bench_replay_tests.py
 
   rocketpy-reference:
     runs-on: ubuntu-latest
@@ -39,12 +44,15 @@ jobs:
       - name: Build controller bridge
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --config Release --target ambar_controller_bridge --parallel
+          cmake --build build --config Release --target ambar_stm32_controller_bridge --parallel
+
+      - name: Run Monte Carlo orchestration tests
+        run: python -m unittest sim/rocketpy/test_monte_carlo.py
 
       - name: Run RocketPy reference checks
         id: rocketpy
         continue-on-error: true
-        run: python sim/rocketpy/run_rocketpy_sim.py --bridge build/ambar_controller_bridge
+        run: python sim/rocketpy/run_rocketpy_sim.py --bridge build/ambar_stm32_controller_bridge
 
       - name: Explain provisional reference failures
         if: steps.rocketpy.outcome == 'failure'

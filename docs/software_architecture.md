@@ -2,107 +2,104 @@
 
 ## Design Goal
 
-The project keeps flight decisions in one reusable C++ core. Desktop demos,
-test sandboxes, RocketPy, and future STM32 firmware should all call the same
-`AmbarFlightComputer` interface. This prevents a simulation-only controller
-from drifting away from the code intended for the vehicle.
+The production STM32 flight modules are the source of truth for the main
+closed-loop simulation. RocketPy and the Monte Carlo campaign compile the same
+`ambar_ekf.c` and `ambar_flight.c` files used by the CubeIDE firmware. The older
+C++ `AmbarFlightComputer` remains useful for fast native regression sandboxes,
+but it is not used to claim production-controller trajectory results.
 
-## Data Flow
+## Production Closed-Loop Data Flow
 
 ```mermaid
 flowchart LR
-    S["IMU and barometer samples"] --> F["AmbarFlightComputer"]
-    F --> E["Vertical EKF"]
-    E --> P["Flight phase tracker"]
-    P --> C["Airbrake controller"]
-    C --> O["AirbrakeCommand"]
-    O --> A["Actuator layer or virtual airbrakes"]
-
-    R["RocketPy trajectory"] --> B["controller_bridge.exe"]
-    R --> SM["Provisional sensor error model"]
-    SM --> B
-    B --> F
-    O --> B
-    B --> R
-
-    U["Browser UI"] --> H["simulation_ui_server.py"]
-    H --> PS["PowerShell runners"]
-    PS --> T["C++ suites and RocketPy"]
-    T --> H
-    H --> U
+    R["RocketPy vehicle truth"] --> S["Body-axis IMU and barometer model"]
+    S --> B["ambar_stm32_controller_bridge"]
+    B --> E["Production ambar_ekf.c"]
+    E --> F["Production ambar_flight.c"]
+    F --> C["Bounded deployment command"]
+    C --> A["Delayed and rate-limited virtual actuator"]
+    A --> R
+    R --> O["CSV, JSON, and representative replay profiles"]
 ```
 
-## Shared Flight Logic
+RocketPy owns atmosphere, motor mass change, six-degree-of-freedom vehicle
+motion, provisional sensors, and virtual actuator motion. The C bridge owns
+persistent production estimator/phase/controller state. A deployment command
+therefore changes the next RocketPy trajectory sample.
 
-| File | Responsibility | Used By |
-| --- | --- | --- |
-| `include/ambar_airbrake.hpp` | Public estimator, phase, controller, command, and facade interfaces | Desktop demo, flight sandbox, RocketPy bridge, future firmware |
-| `src/ambar_airbrake.cpp` | Platform-independent implementation of those interfaces | Linked into every target that needs real flight logic |
-| `include/ambar_project_requirements.hpp` | M5 mission limits and targets | Electronics and actuator checks, future requirement tests |
-| `include/ambar_board_pins.hpp` | V3 MCU pin naming | Compile-time checks and future STM32 board support |
-| `include/ambar_device_constants.hpp` | Datasheet addresses, IDs, bus modes, and limits | Electronics checks and future hardware drivers |
+The firmware currently consumes one configured, pad-referenced body-axis
+accelerometer channel without attitude rotation. The simulation mirrors that
+contract by projecting RocketPy acceleration into the rocket body axis before
+adding sensor errors. It does not yet reproduce vibration, mounting error, raw
+register behavior, or the complete STM32 scheduler.
 
-The core accepts launch-frame vertical acceleration and barometric altitude
-above the pad. Raw sensor register reads, axis rotation, gravity removal, motor
-steps, and radio packets belong outside this layer.
+## Production Firmware Modules
 
-## Native Executables
+| File | Responsibility |
+| --- | --- |
+| `firmware/stm32_airbrake_pcb/Core/Src/ambar_ekf.c` | Vertical estimator and health state |
+| `firmware/stm32_airbrake_pcb/Core/Src/ambar_flight.c` | Flight phases, drag-aware/ballistic apogee estimates, and airbrake command |
+| `firmware/stm32_airbrake_pcb/Core/Src/ambar_app.c` | Runtime configuration, scheduling, USB commands, logging, and subsystem integration |
+| `sim/stm32_controller_bridge.c` | Small host adapter around the production EKF/flight modules |
+| `sim/rocketpy/run_rocketpy_sim.py` | One paired passive/controlled physics study |
+| `sim/rocketpy/run_monte_carlo.py` | Repeated baseline and seeded Latin-hypercube campaign |
 
-| Target | Use Case | Important Limitation |
-| --- | --- | --- |
-| `rocket_airbrake_ekf.exe` | Small API example and smoke test | Uses toy motion, not reference rocket physics |
-| `sim_flight_sandbox.exe` | Fast repeatable estimator/controller fault tests | Simplified one-dimensional flight model |
-| `sim_electronics_sandbox.exe` | Review startup ARMABLE/BLOCKED policy | Does not emulate real I2C/SPI transactions |
-| `sim_actuator_sandbox.exe` | Review homing, rate, inhibit, and jam behavior | Not a TMC5240 driver or final mechanism model |
-| `sim_fault_replay_sandbox.exe` | Review timestamp/sensor fault policy and deterministic replay | Synthetic log; no real driver freshness data |
-| `sim_monte_carlo_sandbox.exe` | Fixed-seed software safety dispersion | Provisional 1-D distributions; not mission probability |
-| `ambar_core_tests.exe` | Focused assertions for public flight-core behavior | Does not exercise hardware drivers |
-| `ambar_controller_bridge.exe` | Preserve C++ controller state while RocketPy runs | Machine protocol only; not intended for direct use |
+The host bridge starts from compiled `AmbarFlight_DefaultConfig()` values and
+applies the fixed controller fields recorded in
+`sim/rocketpy/ambar_reference_config.json`. A board can load a different saved
+configuration from flash, so board configuration readback must be compared
+before treating software-in-the-loop and hardware behavior as equivalent.
 
-`CMakeLists.txt` defines the same target graph for CMake users.
-`scripts/run_sandboxes.ps1` provides the proven direct-compiler path on Windows.
+## Legacy Native C++ Sandboxes
 
-## RocketPy Closed Loop
+`include/ambar_airbrake.hpp` and `src/ambar_airbrake.cpp` implement an older
+portable C++ model. These fast executables remain regression and teaching tools:
 
-`scripts/run_rocketpy_sim.ps1` builds the controller bridge and launches
-`sim/rocketpy/run_rocketpy_sim.py`. RocketPy owns atmosphere, motor mass change,
-aerodynamics, and trajectory integration. At each controller sample:
+- `sim_flight_sandbox.exe`
+- `sim_electronics_sandbox.exe`
+- `sim_actuator_sandbox.exe`
+- `sim_fault_replay_sandbox.exe`
+- `sim_monte_carlo_sandbox.exe`
+- `ambar_core_tests.exe`
+- `ambar_controller_bridge.exe`
 
-1. RocketPy supplies trajectory truth and applies configured wind.
-2. The Python sensor adapter adds deterministic provisional bias, noise,
-   quantization, saturation, and latency.
-3. The Python process sends a `STEP` message to `ambar_controller_bridge.exe`.
-4. The bridge calls the real C++ `AmbarFlightComputer` instance.
-5. The bridge returns estimate, phase, health, and deployment command.
-6. RocketPy rate-limits that command and applies it to its virtual airbrakes.
+They do not replace the production STM32-C bridge. In particular, the legacy
+200-case Monte Carlo executable uses simplified 1-D physics and hard-coded
+distributions.
 
-Vehicle inputs live in `sim/rocketpy/ambar_reference_config.json`; motor thrust
-lives in `sim/rocketpy/j420r.eng`. Detailed run data is written to
-`build/rocketpy-last-run.json`.
+## Monte Carlo Evidence Bundle
+
+`scripts/run_monte_carlo.ps1` always rebuilds the production-C bridge, resolves
+all trial inputs before run 1, and writes `parameters.csv`, a running manifest,
+and input snapshots up front. `runs.csv` is replaced atomically after every
+attempt so an interrupted campaign retains completed evidence. Final output
+adds aggregate metrics, sensitivity ranks, representative time histories, and
+OpenRocket-compatible profiles for selected USB/HIL replays.
+
+The randomized plant/sensor/actuator truth is deliberately separate from the
+fixed controller configuration. This prevents the controller from receiving
+the randomized motor burn time, mass, drag, or sensor errors as foreknowledge.
 
 ## Simulation Console
 
-The browser layer is deliberately thin:
+The browser UI is a thin launcher and report viewer:
 
 - `scripts/run_simulation_ui.ps1` starts the local server.
-- `scripts/simulation_ui_server.py` serves `ui/` and dispatches run requests.
-- The server attaches `build/rocketpy-last-run.json` to RocketPy responses so
-  the browser can plot the validated sample log without scraping terminal text.
-- `ui/index.html` defines the static page structure.
-- `ui/styles.css` controls presentation only.
-- `ui/app.js` requests runs, parses suite output, and renders results.
+- `scripts/simulation_ui_server.py` validates temporary trade-study inputs.
+- `ui/app.js` displays results from native executables and
+  `build/rocketpy-last-run.json`.
 
-The UI does not contain alternate pass/fail physics or control behavior. Its
-source of truth is the output of the executable suites.
+The UI quick `Run All` path excludes the longer production Monte Carlo
+campaign. Run that campaign from `Run Monte Carlo Simulation.cmd` or its
+PowerShell script.
 
 ## Which Entry Point To Use
 
-- Use `scripts/run_all_simulations.ps1` before reviews or commits.
-- Use `scripts/run_sandboxes.ps1` for quick C++ logic and fault checks.
-- Use `scripts/run_rocketpy_sim.ps1` for trajectory and apogee studies.
-- Use `scripts/run_simulation_ui.ps1` when reviewing results visually.
-- Use `src/main.cpp` when learning the `AmbarFlightComputer` API.
-- Use `ctest --test-dir build --output-on-failure` for the native automated
-  verification set after a CMake build.
-- Start future embedded integration with `include/ambar_airbrake.hpp`, then add
-  board drivers and scheduling around it rather than modifying simulation code.
+- Use `scripts/run_sandboxes.ps1` for fast legacy native regressions.
+- Use `scripts/run_rocketpy_sim.ps1` for one production-controller trajectory.
+- Use `scripts/run_monte_carlo.ps1` for repeated robustness screening and CSVs.
+- Use `scripts/run_simulation_ui.ps1` to inspect the one-run and native results.
+- Use the tools under `firmware/stm32_airbrake_pcb/tools/usb_protocol` for
+  selected STM32 USB/HIL replays.
+- Use the CubeIDE project under `firmware/stm32_airbrake_pcb` for the board
+  firmware build and flash workflow.

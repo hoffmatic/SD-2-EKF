@@ -53,6 +53,7 @@ def field_spec(
     to_config=lambda value: value,
     from_config=lambda value: value,
     integer: bool = False,
+    mirror_paths: tuple[tuple[str, ...], ...] = (),
 ) -> dict:
     return {
         "id": field_id,
@@ -67,11 +68,23 @@ def field_spec(
         "to_config": to_config,
         "from_config": from_config,
         "integer": integer,
+        "mirror_paths": mirror_paths,
     }
 
 
 INPUT_SPECS = [
-    field_spec("targetApogeeFt", "Target apogee", "Mission", "ft", 500, 12500, 10, ("requirements", "target_apogee_ft"), "Mission setting"),
+    field_spec(
+        "targetApogeeFt",
+        "Target apogee",
+        "Mission",
+        "ft",
+        500,
+        12500,
+        10,
+        ("requirements", "target_apogee_ft"),
+        "Mission/controller setting",
+        mirror_paths=(("controller", "target_apogee_ft"),),
+    ),
     field_spec("railLengthFt", "Rail length", "Launch", "ft", 4, 30, 0.25, ("environment", "rail_length_m"), "M5 report", lambda value: value * FEET_TO_METERS, lambda value: value / FEET_TO_METERS),
     field_spec("launchAngleFromVerticalDeg", "Angle from vertical", "Launch", "deg", 0, 20, 0.5, ("environment", "inclination_deg"), "Launch setting", lambda value: 90.0 - value, lambda value: 90.0 - value),
     field_spec("headingDeg", "Heading", "Launch", "deg", 0, 360, 1, ("environment", "heading_deg"), "M5 report"),
@@ -84,7 +97,7 @@ INPUT_SPECS = [
     field_spec("finRootChordIn", "Fin root chord", "Vehicle", "in", 1, 24, 0.1, ("rocket", "fin_root_chord_m"), "M5 report", lambda value: value * INCHES_TO_METERS, lambda value: value / INCHES_TO_METERS),
     field_spec("finTipChordIn", "Fin tip chord", "Vehicle", "in", 0.1, 24, 0.1, ("rocket", "fin_tip_chord_m"), "M5 report", lambda value: value * INCHES_TO_METERS, lambda value: value / INCHES_TO_METERS),
     field_spec("finSpanIn", "Fin span", "Vehicle", "in", 0.5, 20, 0.1, ("rocket", "fin_span_m"), "M5 report", lambda value: value * INCHES_TO_METERS, lambda value: value / INCHES_TO_METERS),
-    field_spec("postBurnMarginS", "Post-burn inhibit margin", "Airbrake", "s", 0, 3, 0.05, ("airbrakes", "post_burn_enable_margin_s"), "Safety setting"),
+    field_spec("minimumBoostTimeS", "Controller minimum boost time", "Airbrake", "s", 0, 5, 0.05, ("controller", "minimum_boost_time_s"), "Current firmware configuration"),
     field_spec("maximumDeploymentRatePercentS", "Maximum deployment rate", "Airbrake", "%/s", 5, 500, 5, ("airbrakes", "maximum_rate_fraction_per_s"), "Placeholder", lambda value: value / 100.0, lambda value: value * 100.0),
     field_spec("fullDeploymentDragCoefficient", "Full-deployment drag increment", "Airbrake", "Cd", 0, 3, 0.01, ("airbrakes", "drag_coefficient_at_full_deployment"), "Placeholder"),
     field_spec("controllerRateHz", "Controller rate", "Sensors", "Hz", 10, 1000, 10, ("airbrakes", "sampling_rate_hz"), "Model setting"),
@@ -127,7 +140,7 @@ def baseline_inputs() -> dict[str, float | int]:
 
 
 def public_input_schema() -> list[dict]:
-    private_keys = {"path", "to_config", "from_config", "integer"}
+    private_keys = {"path", "to_config", "from_config", "integer", "mirror_paths"}
     return [{key: value for key, value in spec.items() if key not in private_keys} for spec in INPUT_SPECS]
 
 
@@ -174,7 +187,10 @@ def validate_inputs(requested: object) -> tuple[dict[str, float | int], dict]:
         normalized[field_id] = int(numeric) if spec["integer"] else numeric
 
     for spec in INPUT_SPECS:
-        set_at_path(overrides, spec["path"], spec["to_config"](normalized[spec["id"]]))
+        converted = spec["to_config"](normalized[spec["id"]])
+        set_at_path(overrides, spec["path"], converted)
+        for mirror_path in spec["mirror_paths"]:
+            set_at_path(overrides, mirror_path, converted)
     return normalized, overrides
 
 
