@@ -88,11 +88,14 @@ The RocketPy reference model now uses:
   placement.
 - M5 constant wind of 3.58 m/s from 225 degrees.
 - Deterministic provisional accelerometer/barometer bias, noise, quantization,
-  and 20 ms latency before measurements reach the C++ bridge.
+  and 20 ms latency. Acceleration is projected into RocketPy body Z and pad
+  referenced before reaching the production STM32-C bridge.
 - June 14 M5 OpenRocket passive apogee of 3379 ft as the current comparison
   point. The provisional RocketPy model is intentionally allowed to fail this
   comparison rather than being silently retuned.
-- The real C++ `AmbarFlightComputer` through a persistent process bridge.
+- Production STM32 `ambar_ekf.c` and `ambar_flight.c` through a persistent host
+  bridge. The host uses a fixed recorded configuration; a board can load
+  different saved flash values.
 
 ## Values Still Not Available
 

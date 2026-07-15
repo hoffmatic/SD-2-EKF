@@ -8,12 +8,12 @@ because Word numbering may move as content is added.
 
 | Report location | Problem | Manual change | Evidence/type |
 | --- | --- | --- | --- |
-| `2.1.1.1` flight-control algorithm | The report describes a drag-aware `k/log1p` controller and consistent +/-10 ft results, but that source and reproducible evidence are not in GitHub or SharePoint. | State that the current embedded scaffold uses the ballistic predictor `h + v^2/(2g)`. Describe drag-aware prediction as planned work unless the missing implementation and test evidence are supplied. Remove the general +/-10 ft claim. | Factual correction; `src/ambar_airbrake.cpp`, `tests/ambar_core_tests.cpp` |
+| `2.1.1.1` flight-control algorithm | The report describes a drag-aware `k/log1p` controller and consistent +/-10 ft results without reproducible calibration evidence. | State that production `ambar_flight.c` now exposes both a ballistic comparison and a provisional numerically integrated vertical drag predictor. Remove the general +/-10 ft claim until measured mass/CdA/density and held-out results support it. | Factual correction; production firmware and current campaign |
 | `2.1.1.2 Airbrake Flight Computer Tests` | Section is empty. | Add a short test matrix covering core assertions, five flight cases, six electronics cases, four actuator cases, four fault/replay cases, and the 200-trial fixed-seed study. Explain that these are desktop software tests, not hardware qualification. | Missing evidence; `docs/project_status.md` |
-| `1.5.1 Software-in-the-Loop` | Current wording can imply that the model predicts the complete chip and vehicle. | Explain that SIL executes shared C++ logic against simplified physics and fault models. Explicitly exclude PCB power integrity, real buses, raw IMU orientation, mechanism loads, RF behavior, and manufacturing variation. | Scope correction |
+| `1.5.1 Software-in-the-Loop` | Current wording can imply that the model predicts the complete chip and vehicle. | Explain that the main SIL executes production STM32-C EKF/flight modules against provisional RocketPy physics, body-axis sensor, and actuator models. Explicitly exclude PCB power integrity, real buses/registers, vibration, mechanism loads, RF behavior, and manufacturing variation. | Scope correction |
 | `1.5.1.1 Flight Control Suite` | Screenshot lacks the updated fault/replay and Monte Carlo coverage. | Add the test conditions and pass rules from the new suites. Report the 200/200 safety result and the informational 15/200 target-hit count together; do not present 15/200 as a validated probability. | Current repository result |
-| `1.5.1.2 RocketPy Physics` | Earlier text/results use the older geometry and truth-level sensors. | State that the current run uses June 2 OpenRocket geometry, 3.58 m/s constant wind from 225 degrees, and deterministic provisional sensor bias/noise/quantization/latency. Report 3851 ft passive, 2973 ft closed-loop, Mach 0.494, and 42.7 ft/s rail exit. | Current run; `build/rocketpy-last-run.json` is generated locally |
-| RocketPy conclusions | A closed-loop result inside tolerance may be presented as proof of accuracy. | Say that -21 ft is a necessary target-band check only. The passive comparison fails by +14.0% and rail exit fails, so target accuracy is not validated. | Model limitation |
+| `1.5.1.2 RocketPy Physics` | Earlier text/results use the legacy C++ controller and truth-level sensor. | State that the current run uses June 2 geometry, 3.58 m/s wind from 225 degrees, a pad-referenced body-axis sensor model, and production STM32-C flight modules. Report 3829 ft AGL passive, 3327 ft AGL closed-loop, Mach 0.494, and 42.7 ft/s rail exit. | Current run; `build/rocketpy-last-run.json` is generated locally |
+| RocketPy conclusions | Older wording may present an in-band legacy result as proof of accuracy. | State that the current production-controller result is +327 ft above target; passive comparison and rail-exit checks also fail. The seeded 50-run campaign is exploratory screening, not validation. | Model limitation |
 
 ## Hardware and Architecture Corrections
 
@@ -67,7 +67,7 @@ For simulation conclusions, use language similar to:
 > The software-in-the-loop tests verify deterministic software reactions to
 > declared virtual inputs. They do not qualify the PCB, sensors, actuator, RF
 > link, or final vehicle aerodynamics. The current RocketPy model produces a
-> 2973 ft closed-loop apogee, but passive-model and rail-exit comparisons fail;
+> 3327 ft AGL closed-loop apogee, while target, passive-model, and rail-exit checks fail;
 > therefore, target accuracy remains provisional pending model reconciliation
 > and hardware testing.
 

@@ -21,33 +21,36 @@ burnout, and live flight-state telemetry.
 - Virtual sandboxes for flight behavior, electronics bring-up checks, and
   actuator motion/fault behavior
 - RocketPy 1.12.1 trajectory physics using the M5-selected J420R thrust curve
-  and a persistent bridge to the real C++ estimator/controller
-- Deterministic timestamp/sensor fault injection, synthetic log replay, and a
-  200-trial fixed-seed Monte Carlo safety study
+  and a persistent bridge compiled from the production STM32 C estimator and
+  flight-controller sources
+- Deterministic timestamp/sensor fault injection, synthetic log replay, an
+  older 200-trial 1-D safety sandbox, and a production-controller RocketPy
+  campaign with per-run CSV output and seeded Latin-hypercube variation
 - CTest regression tests and GitHub Actions verification
 
 ## Current Status
 
 This is an integration scaffold, not flight-ready software.
 
-The June 14 M5 report cross-check currently fails: RocketPy predicts 3851 ft
-passive apogee versus 3379 ft in the report and only 42.7 ft/s off the reported
-72-inch rail. The closed-loop result is 2973 ft, but that does not validate
-target accuracy while the passive and rail-exit checks fail. These mismatches
-remain visible until the OpenRocket configuration, mass properties, and drag
-data are reconciled.
+The current production-STM32-C RocketPy cross-check fails: the nominal model
+predicts 3829 ft AGL passive apogee versus 3379 ft in the June 14 M5 report and
+only 42.7 ft/s off the reported 72-inch rail. Closed loop reaches 3327 ft AGL,
+about 327 ft above target. These mismatches remain visible until the OpenRocket
+configuration, mass properties, and drag data are reconciled.
 
-Before use in flight hardware, add:
+Before use in flight hardware:
 
-- Board support for the actual IMU, barometer, radio, logger, and actuator
-- IMU body-axis alignment and gravity compensation
+- Calibrate and hardware-qualify the existing sensor, radio, flash, USB, and
+  TMC5240 driver paths
+- Validate IMU mounting-axis selection, pad reference, and attitude limitations
 - Final measured mass properties and drag curves for the RocketPy model
-- A drag-aware embedded apogee predictor calibrated from RocketPy/OpenRocket and flight logs
-- TMC5240 motor driver limits, current monitoring, and fail-safe behavior
+- Calibrate the existing drag-aware embedded predictor against final
+  RocketPy/OpenRocket inputs and recorded tests
+- Confirm TMC5240 current, speed, travel, homing, load, and fail-safe limits on
+  the final mechanism
 - Hardware-in-the-loop tests and recorded hardware-log replay
-- Telemetry packet definitions for estimate, phase, command, and health
-- STM32CubeIDE firmware for the first bench-gated airbrake PCB integration
-  under `firmware/stm32_airbrake_pcb`
+- Verify the existing telemetry/config/log packet paths against the GUI and
+  ground station
 
 ## Build
 
@@ -68,6 +71,19 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run_rocketpy_sim.ps1
 
 The first RocketPy run creates a local `.venv` and installs the pinned dependency.
 
+Two baseline repeats plus 50 randomized closed-loop runs:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_monte_carlo.ps1
+```
+
+You can also double-click `Run Monte Carlo Simulation.cmd`. Results are written
+under `build\monte-carlo\<campaign-id>\`, including `runs.csv`, aggregate
+metrics, sensitivity results, and representative profiles. See
+[docs/monte_carlo_campaign.md](docs/monte_carlo_campaign.md).
+`scripts/validate_monte_carlo_output.py` independently recomputes saved counts,
+rates, distributions, joins, worst cases, and snapshot hashes.
+
 Browser simulation console:
 
 ```powershell
@@ -76,7 +92,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run_simulation_ui.ps1
 
 The local dashboard provides Run All/Run Suite controls, adjustable RocketPy
 trade-study inputs, scenario tables, interactive altitude/speed/acceleration/
-deployment graphs, a C++ phase timeline, CSV/JSON export, source-gap tracking,
+deployment graphs, a production STM32-C phase timeline, CSV/JSON export, source-gap tracking,
 and the complete raw terminal output. See
 [docs/simulation_ui.md](docs/simulation_ui.md).
 
@@ -91,6 +107,7 @@ cmake --build build
 .\build\Debug\sim_monte_carlo_sandbox.exe
 .\build\Debug\ambar_core_tests.exe
 .\build\Debug\ambar_controller_bridge.exe
+.\build\Debug\ambar_stm32_controller_bridge.exe
 ```
 
 For single-config generators, the executable may be under `build/rocket_airbrake_ekf`.
@@ -114,10 +131,9 @@ g++ -std=c++17 -Wall -Wextra -Wpedantic -I include sim/actuator_sandbox.cpp -o b
 .\build\sim_actuator_sandbox.exe
 ```
 
-## Sensor Interface
+## Legacy C++ Sensor Interface
 
-The EKF expects vertical acceleration in the launch frame, positive upward, after
-IMU axis alignment and gravity compensation:
+The older native C++ scaffold expects vertical acceleration in the launch frame:
 
 ```cpp
 flightComputer.updateImu(timestamp_s, verticalAcceleration_mps2);
@@ -129,15 +145,18 @@ The barometer update expects altitude above the launch pad:
 flightComputer.updateBarometer(barometerAltitudeAgl_m, barometerStdDev_m);
 ```
 
-The actuator should consume only `AirbrakeCommand`. If `inhibit` is true, command
-the safe/retracted state.
+The production STM32 firmware instead consumes its configured, pad-referenced
+IMU body-axis channel. The main RocketPy campaign now models that current
+firmware contract, including attitude projection, while retaining world-vertical
+truth as a separate diagnostic.
 
 ## Software Architecture
 
-The repository has one shared C++ flight-logic core and several adapters around
-it. Desktop simulations, RocketPy, and future STM32 firmware are intended to use
-the same `AmbarFlightComputer` API rather than duplicate estimator or controller
-logic. The browser UI launches those programs and displays their reports; it
+The repository retains an older shared C++ flight-logic scaffold for native
+sandboxes. RocketPy and the new Monte Carlo campaign now use a separate bridge
+compiled directly from the production STM32 `ambar_ekf.c` and `ambar_flight.c`
+sources, preventing controller drift between the board and the main closed-loop
+physics study. The browser UI launches programs and displays their reports; it
 does not simulate the rocket itself.
 
 See [docs/software_architecture.md](docs/software_architecture.md) for the data

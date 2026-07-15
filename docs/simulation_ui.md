@@ -1,7 +1,7 @@
 # Simulation Console UI
 
-The browser-based AMBAR Simulation Console runs the existing C++ sandbox
-executables plus the RocketPy physics backend and presents their output as scenario tables, status summaries,
+The browser-based AMBAR Simulation Console runs legacy C++ sandbox executables
+plus the production STM32-C/RocketPy physics backend and presents their output as scenario tables, status summaries,
 details, source gaps, and a raw terminal log.
 
 ## Start The UI
@@ -21,9 +21,9 @@ http://127.0.0.1:8765
 
 ## Controls
 
-- `Run All` runs core assertions, fault/replay, Monte Carlo, flight,
-  electronics, actuator, and RocketPy checks. The dashboard summarizes the four
-  main suites; the complete added-suite output remains available in Raw Output.
+- `Run All` runs the quick core assertions, fault/replay, legacy 1-D Monte
+  Carlo, flight, electronics, actuator, and one RocketPy check. It intentionally
+  excludes the several-minute production 50-run campaign.
 - `Run Suite` runs only the currently selected suite.
 - `Rebuild` recompiles before running. Leave it off for faster repeat runs.
 - Select a scenario row to inspect its condition, pass rule, measurements, and
@@ -34,10 +34,10 @@ http://127.0.0.1:8765
 - `Inputs` exposes the RocketPy assumptions that are useful for trade studies.
   Change values, select `Run RocketPy`, and the results will be labeled as an
   experimental-input run. `Reset Baseline` restores the reviewed configuration.
-- `Flight Data` plots the structured RocketPy/C++ time history. The altitude,
+- `Flight Data` plots the structured RocketPy/STM32-C time history. The altitude,
   speed, vertical-acceleration, and deployment graphs use phase-colored
   backgrounds and distinguish trajectory truth, virtual sensor measurements,
-  and C++ EKF estimates. Hover over a graph for the time, phase, and channel
+  and production EKF estimates. Hover over a graph for the time, phase, and channel
   values. CSV and JSON downloads preserve the complete sample log.
 
 ## Adjustable Inputs
@@ -48,8 +48,8 @@ The Inputs view groups controls by their engineering role:
 - Launch: rail length, angle from vertical, heading, constant wind speed, and
   wind-from direction.
 - Vehicle: dry mass, powered/coast drag coefficients, and stabilizing-fin geometry.
-- Airbrake: post-burn inhibit margin, deployment-rate limit, and full-deployment
-  drag increment.
+- Airbrake: fixed controller minimum-boost time, deployment-rate limit, and
+  full-deployment drag increment.
 - Sensors: controller/barometer rates plus provisional accelerometer bias/noise,
   barometer bias/noise, and latency.
 
@@ -68,12 +68,18 @@ for the selected run; it does not edit `sim/rocketpy/ambar_reference_config.json
 Measured mass properties and aerodynamic calibration should still be committed
 to the reference configuration after team review.
 
-The UI does not change the simulation math. It calls the C++ sandboxes and the
-RocketPy runner, parses their human-readable pass/fail output, and reads
+The UI does not change the simulation math. It calls the legacy C++ sandboxes
+and production STM32-C RocketPy runner, parses their pass/fail output, and reads
 `build/rocketpy-last-run.json` for the plotted time series. The RocketPy output
 has a separate validator that checks timestamps, fields, bounds, sampling, and
 post-apogee phase coverage before the dashboard marks the data check as passed.
 
-The acceleration graph is not raw IMU specific force. It is launch-frame
-vertical acceleration after the model assumes body-axis alignment and gravity
-compensation, which is the input contract expected by the current C++ EKF.
+The acceleration graph keeps world-vertical truth separate from the virtual
+sensor. The sensor channel projects specific force into RocketPy body Z,
+subtracts its pad reference, then applies configured noise/bias/latency. This
+matches the current firmware's single-axis contract more closely, but still
+does not model vibration, mounting error, or raw sensor registers.
+
+Run the production robustness campaign separately with
+`Run Monte Carlo Simulation.cmd`; see
+[monte_carlo_campaign.md](monte_carlo_campaign.md).

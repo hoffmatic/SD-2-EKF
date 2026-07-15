@@ -1,106 +1,108 @@
 # Project Status and Evidence Levels
 
-Status date: June 14, 2026
+Status date: July 15, 2026
 
-This document separates working software from simulations, provisional design
-inputs, and future work. A statement in the **implemented** column means code is
-present and exercised in this repository. It does not mean flight hardware has
-been qualified.
+This page separates code that exists from behavior proven in simulation, on the
+bench, or in flight. “Implemented” does not mean hardware-qualified.
 
-## Current Baselines
+## Current Architecture
 
-| Area | Baseline | Maturity |
+| Area | Current baseline | Evidence level |
 | --- | --- | --- |
-| Flight logic | C++ `AmbarFlightComputer` in this repository | Implemented and desktop-tested |
-| Apogee predictor | Ballistic `v^2/(2g)` coast estimate | Implemented; drag-aware replacement is future work |
-| PCB | SharePoint `Electrical/pcb/` KiCad project uploaded June 2, 2026 | Provisional; placed but unrouted |
-| Vehicle geometry | June 2 OpenRocket file, with 79.248 mm diameter, 285.75 mm nose, and approximately 1.492 m total length | Imported into the RocketPy reference config; mass/drag remain provisional |
-| Mission target | 3000 ft with +/-100 ft tolerance | Used by code and tests; team should keep one canonical requirement set |
-| Recovery location | Independent GPS recovery hardware | Required outside the airbrake PCB |
-| Airbrake radio | SX1280 at 2.4 GHz | PCB component identified; ground station must also be SX1280-compatible |
+| Production flight logic | STM32-C `ambar_ekf.c` + `ambar_flight.c` | Host-built, replay-tested, and integrated into CubeIDE project |
+| Apogee prediction | Provisional vertical drag-aware predictor plus ballistic comparison | Implemented; mass/CdA/density calibration missing |
+| Main physics study | RocketPy closed loop through production STM32-C bridge | Software-in-the-loop screening |
+| Robustness study | Seeded Latin-hypercube paired passive/controlled campaign | Reproducible exploratory evidence, not qualification |
+| Legacy regressions | C++ `AmbarFlightComputer` sandboxes | Useful fast fixtures; not production controller |
+| Mission target | 3000 ft AGL with +/-100 ft tolerance | Fixed acceptance requirement |
 
 ## Implemented
 
-- Four-state vertical EKF for altitude, velocity, accelerometer bias, and
-  barometer bias.
-- Timestamp validation, barometer innovation gating, Joseph-form covariance
-  update, and health counters.
-- Flight phases and deployment interlocks for estimator health, phase,
-  altitude, flight time, descent, and predicted apogee.
-- Ballistic apogee prediction and bounded deployment command.
-- Board pin constants and datasheet-derived component constants.
-- Native flight, electronics, actuator, fault/replay, and fixed-seed Monte
-  Carlo sandboxes.
-- RocketPy-to-C++ closed-loop bridge with report-backed constant wind and a
-  deterministic provisional sensor-error model.
-- CTest unit/regression targets and GitHub Actions verification.
+- Four-state vertical EKF, barometer innovation gating, covariance/health
+  tracking, phase logic, interlocks, and bounded airbrake command.
+- Ballistic and provisional drag-aware apogee outputs.
+- STM32 application scheduling, runtime configuration, direct USB protocol,
+  simulation input, telemetry, flash logging, and feature flags.
+- BMP388, LSM6DSV32X, LIS2MDL, W25Q64, SX1280, and TMC5240 code paths in the
+  CubeIDE project. Their presence is not a claim of final-board qualification.
+- Production-C host bridge used by both one-run RocketPy and Monte Carlo.
+- Pad-referenced RocketPy body-axis IMU model, sparse barometer model, actuator
+  delay/rate model, and closed aerodynamic feedback.
+- Two-baseline plus configurable seeded randomized campaigns with per-run CSV,
+  aggregate metrics, sensitivity ranks, representative USB replay profiles,
+  atomic checkpoints, and exact input/binary snapshots.
 
-## Simulated, Not Hardware-Verified
-
-- Airbrake deployment reducing apogee in the provisional RocketPy model.
-- Estimator/controller behavior under deterministic noise, bias, barometer
-  spikes, timestamp faults, NaN input, dropouts, actuator lag, and jams.
-- Virtual boot decisions for expected chip IDs, bus modes, power limits, and
-  missing devices.
-- Fixed-seed dispersion across provisional thrust, drag, sensor, and actuator
-  inputs.
-- Replay of the versioned synthetic log in
-  `sim/replay/nominal_vertical_log.csv`.
-
-## Current Verification Snapshot
+## Current Nominal Software-in-the-Loop Snapshot
 
 | Check | Result | Interpretation |
 | --- | --- | --- |
-| Core C++ assertions | PASS, 19 assertions | Public estimator, phase, controller, and fault contracts behave as tested |
-| Native flight scenarios | PASS, 5/5 | Safety behavior passes; nominal apogee calibration remains outside tolerance |
-| Electronics scenarios | PASS, 6/6 | Virtual boot policy catches the injected faults |
-| Actuator scenarios | PASS, 4/4 | Virtual motion policy catches unhomed and jam conditions |
-| Fault/replay scenarios | PASS, 4/4 | Timing faults, invalid input, dropout propagation, and deterministic replay are explicit |
-| Native Monte Carlo | PASS safety checks, 200/200 | Commands remained healthy and bounded; only 15/200 provisional trials hit 3000 +/-100 ft |
-| RocketPy passive reference | FAIL, 3851 ft vs 3379 ft | Vehicle mass/drag reconstruction does not yet match OpenRocket |
-| RocketPy closed-loop coupling | PASS, 2973 ft | C++ bridge and safety ordering work in the provisional model |
-| RocketPy target band | PASS, -21 ft | Necessary result only; not validated while passive-model checks fail |
-| RocketPy rail exit | FAIL, 42.7 ft/s vs 52 ft/s minimum | Model or launch configuration requires reconciliation |
-| RocketPy time-history integrity | PASS, 1727 samples through Recovery | Structured graph data is monotonic, bounded, and independently validated |
+| Deterministic baseline repeat | PASS | Repeated controller histories and outcomes match |
+| Passive OpenRocket comparison | FAIL: 3829 ft AGL vs 3379 ft AGL | Vehicle mass/drag reconstruction is not calibrated |
+| Production-C closed-loop coupling | PASS: 3327 ft AGL | Command changes the RocketPy trajectory by about 502 ft |
+| Target band | FAIL: +327 ft | Current controller/model combination misses 3000 +/-100 ft |
+| Maximum Mach | PASS: 0.494 vs 1.0 limit | Nominal model stays subsonic |
+| Rail exit | FAIL: 42.7 ft/s vs 52 ft/s minimum | Launch/model configuration must be reconciled |
+| First command / virtual motion | 4.42 s / 4.52 s | Both occur after true 1.64 s burnout plus margin |
+| Phase sequence | PadIdle -> Boost -> Coast -> AirbrakeActive -> Recovery | Monotonic production phase path |
+
+## Seeded 50-Run Screening Snapshot
+
+Seed `20260715` with the provisional Latin-hypercube ranges produced:
+
+| Metric | Result |
+| --- | --- |
+| Execution errors | 0/50 |
+| Safety passes | 50/50 |
+| Effective apogee reduction | 50/50 |
+| Target-band hits | 0/50 |
+| Complete Mach/rail envelope passes | 0/50; every rail-exit case is below 52 ft/s |
+| Controlled apogee | 3225-3493 ft AGL; median 3307 ft; p95 3414 ft |
+| Apogee reduction | 149-942 ft; median 449 ft |
+| First command | 3.34-6.46 s; no command before randomized burnout plus margin |
+| Recovery retraction | All below 2% within 0.66 s of Recovery |
+
+The 0/50 target result has a two-sided 95% Wilson upper success bound of about
+7.1%; it is evidence of poor performance under these assumptions, not a precise
+estimate of flight success probability.
+
+The values above are above-ground-level. RocketPy’s absolute elevation is
+explicitly removed before mission comparisons.
+
+## Simulated, Not Hardware-Verified
+
+- Closed-loop apogee response to airbrake command.
+- Estimator behavior under provisional bias, noise, latency, launch angle,
+  wind, mass, drag, motor, and actuator variation.
+- Timely virtual retraction after Recovery.
+- Native legacy fault, electronics, and actuator scenarios.
+- OpenRocket-style profiles prepared for selected USB/HIL replays.
 
 ## Provisional or Unresolved
 
-- The June 2 PCB contains 109 footprints but no routed copper segments, vias,
-  or zones. It is not a manufacturing release.
-- Dry mass, center of gravity, inertia, power-on/off drag, airbrake drag, rail
-  button positions, and most sensor errors are placeholders.
-- The OpenRocket file contains cached results but marks its motor simulations
-  as not simulated after later model changes. Rerun the selected configuration
-  before using its output as current evidence.
-- The ground-station BOM entry for SX1262 is incompatible with the flight
-  computer's SX1280. Select an SX1280-compatible ground station or redesign the
-  flight radio; do not claim an end-to-end link until resolved and range-tested.
-- Recovery parachute sources conflict between the OpenRocket model/report and
-  the BOM. Physically verify the installed hardware before updating descent
-  simulations or report claims.
-- TMC5240 brake/dump resistor values, motor current, lead-screw conversion,
-  homing behavior, and stall threshold require electrical/mechanical data.
+- Final flight-ready mass, center of gravity, inertia, rail-button positions,
+  power-on/off drag, and `CdA(Mach, deployment)`.
+- The current airbrake Mach scaling is an explicit randomized placeholder.
+- Sensor noise, bias, mounting-axis accuracy, vibration, static-port lag, and
+  timing distributions require measured logs.
+- Loaded actuator force, travel conversion, current, temperature, homing,
+  stall threshold, and hard-limit behavior require mechanism tests.
+- The host bridge uses compiled/default fixed controller values. A physical
+  board may load different saved flash configuration; compare configuration
+  readback before claiming equivalence.
+- The 50-run campaign is an exploratory screen. Even 50/50 successes would
+  only bound an unseen failure rate to roughly 5.8% at one-sided 95% confidence.
 
-## Not Yet Implemented
+## Not Yet Proven
 
-- STM32 HAL, scheduler, watchdog, brownout recovery, and production firmware.
-- BMP388, LSM6DSV32X, LIS2MDL, W25Q64, SX1280, and TMC5240 hardware drivers.
-- IMU orientation and gravity compensation from raw six-axis measurements.
-- Timestamped barometer freshness detection and frozen-sensor detection.
-- Power-loss-safe flash logging and a versioned telemetry packet protocol.
-- Drag-aware embedded apogee prediction calibrated from source-backed data.
-- Hardware-in-the-loop, environmental, vibration, RF range, power transient,
-  thermal, and controlled flight verification.
+- Independent prediction accuracy against a held-out flight or calibrated
+  high-fidelity aerodynamic model.
+- Final PCB power integrity, bus signal integrity, brownout/watchdog recovery,
+  flash endurance, RF range, or environmental behavior.
+- Physical motor/airbrake position under aerodynamic load; TMC5240 XACTUAL is
+  not an external position encoder.
+- End-to-end GUI/radio/flight behavior under launch conditions.
+- Flight readiness or reliability probability.
 
-## Evidence Rule
-
-Use the following language consistently:
-
-- **Implemented:** code exists and compiles.
-- **Desktop-tested:** automated tests exercise the behavior.
-- **Simulated:** a declared model produced the result.
-- **Provisional:** one or more important inputs are placeholders or conflicted.
-- **Hardware-verified:** measured on the physical system with recorded evidence.
-- **Flight-validated:** demonstrated in controlled flight with traceable logs.
-
-No current result in this repository is hardware-verified or flight-validated.
+Use [monte_carlo_campaign.md](monte_carlo_campaign.md) for the campaign
+workflow and [software_architecture.md](software_architecture.md) for the exact
+production-versus-legacy code split.

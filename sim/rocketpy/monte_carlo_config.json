@@ -1,0 +1,192 @@
+{
+  "schema_version": 1,
+  "study_status": "PROVISIONAL SCREENING STUDY - replace bounds with measured vehicle, sensor, and actuator data",
+  "sampling_method": "latin_hypercube",
+  "default_master_seed": 20260715,
+  "default_baseline_runs": 2,
+  "default_random_runs": 50,
+  "safety_policy_notes": {
+    "deployment_during_recovery": "Command must be zero by the -5 m/s Recovery threshold. Residual physical deployment is recorded and must retract below 2 percent within 1.60 seconds; instantaneous mechanical retraction is not required."
+  },
+  "acceptance": {
+    "passive_reference_tolerance_percent": 10.0,
+    "minimum_effective_apogee_reduction_ft": 10.0,
+    "maximum_commanded_descent_velocity_mps": -5.0,
+    "maximum_recovery_retraction_time_s": 1.60,
+    "required_safety_pass_rate": 1.0,
+    "required_effectiveness_pass_rate": 1.0,
+    "required_target_hit_rate": 0.96,
+    "required_envelope_pass_rate": 1.0,
+    "maximum_p95_absolute_target_error_ft": 100.0,
+    "maximum_worst_absolute_target_error_ft": 200.0
+  },
+  "parameters": [
+    {
+      "name": "rocket_dry_mass_kg",
+      "paths": ["rocket.dry_mass_kg"],
+      "distribution": "triangular",
+      "minimum": 2.70,
+      "mode": 3.00,
+      "maximum": 3.35,
+      "units": "kg",
+      "status": "PLACEHOLDER - final flight-ready dry mass is not measured"
+    },
+    {
+      "name": "rocket_drag_coefficient",
+      "paths": [
+        "rocket.power_on_drag_coefficient",
+        "rocket.power_off_drag_coefficient"
+      ],
+      "distribution": "triangular",
+      "minimum": 0.28,
+      "mode": 0.35,
+      "maximum": 0.42,
+      "units": "dimensionless",
+      "status": "PLACEHOLDER - replace with the final OpenRocket drag-vs-Mach export"
+    },
+    {
+      "name": "center_of_mass_without_motor_m",
+      "paths": ["rocket.center_of_mass_without_motor_m"],
+      "distribution": "uniform",
+      "minimum": 1.05,
+      "maximum": 1.15,
+      "units": "m from tail",
+      "status": "PLACEHOLDER - replace with measured loaded and dry CG bounds"
+    },
+    {
+      "name": "motor_burn_time_s",
+      "paths": ["motor.burn_time_s"],
+      "distribution": "triangular",
+      "minimum": 1.59,
+      "mode": 1.64,
+      "maximum": 1.69,
+      "units": "s",
+      "status": "PROVISIONAL screening range around the J420R curve endpoint"
+    },
+    {
+      "name": "motor_total_impulse_ns",
+      "paths": ["motor.total_impulse_ns"],
+      "distribution": "triangular",
+      "minimum": 618.66,
+      "mode": 651.222182,
+      "maximum": 683.78,
+      "units": "N*s",
+      "status": "PROVISIONAL +/-5 percent screening range around the imported J420R curve"
+    },
+    {
+      "name": "wind_speed_mps",
+      "paths": ["environment.wind_speed_mps"],
+      "distribution": "triangular",
+      "minimum": 0.0,
+      "mode": 3.58,
+      "maximum": 8.0,
+      "units": "m/s",
+      "status": "M5 nominal with provisional presentation-study bounds"
+    },
+    {
+      "name": "wind_from_direction_deg",
+      "paths": ["environment.wind_from_direction_deg"],
+      "distribution": "uniform",
+      "minimum": 180.0,
+      "maximum": 270.0,
+      "units": "deg",
+      "status": "PROVISIONAL"
+    },
+    {
+      "name": "inclination_deg",
+      "paths": ["environment.inclination_deg"],
+      "distribution": "uniform",
+      "minimum": 88.0,
+      "maximum": 90.0,
+      "units": "deg above horizontal",
+      "status": "M5 nominal is vertical; range represents up to 2 deg launch-angle error"
+    },
+    {
+      "name": "airbrake_drag_coefficient",
+      "paths": ["airbrakes.drag_coefficient_at_full_deployment"],
+      "distribution": "triangular",
+      "minimum": 0.65,
+      "mode": 0.95,
+      "maximum": 1.35,
+      "units": "RocketPy delta Cd referenced to vehicle frontal area",
+      "status": "PLACEHOLDER - replace with CdA versus Mach and deployment"
+    },
+    {
+      "name": "airbrake_mach_drag_multiplier",
+      "paths": ["airbrakes.mach_drag_multiplier_at_mach_1"],
+      "distribution": "triangular",
+      "minimum": 0.0,
+      "mode": 0.10,
+      "maximum": 0.20,
+      "units": "fractional Cd increase at Mach 1",
+      "status": "PLACEHOLDER - replace with measured CdA versus Mach and deployment"
+    },
+    {
+      "name": "actuator_rate_fraction_per_s",
+      "paths": ["airbrakes.maximum_rate_fraction_per_s"],
+      "distribution": "triangular",
+      "minimum": 0.80,
+      "mode": 1.55,
+      "maximum": 2.00,
+      "units": "full-stroke fractions/s",
+      "status": "PROVISIONAL - replace with loaded mechanism timing"
+    },
+    {
+      "name": "actuator_delay_s",
+      "paths": ["airbrakes.actuator_delay_s"],
+      "distribution": "triangular",
+      "minimum": 0.05,
+      "mode": 0.10,
+      "maximum": 0.25,
+      "units": "s",
+      "status": "PROVISIONAL - command-to-motion delay"
+    },
+    {
+      "name": "imu_bias_mps2",
+      "paths": ["sensor_model.accelerometer_bias_mps2"],
+      "distribution": "uniform",
+      "minimum": -0.50,
+      "maximum": 0.50,
+      "units": "m/s^2",
+      "status": "PROVISIONAL - replace with calibrated axis data"
+    },
+    {
+      "name": "imu_noise_stddev_mps2",
+      "paths": ["sensor_model.accelerometer_noise_std_dev_mps2"],
+      "distribution": "triangular",
+      "minimum": 0.10,
+      "mode": 0.20,
+      "maximum": 0.40,
+      "units": "m/s^2",
+      "status": "PROVISIONAL"
+    },
+    {
+      "name": "barometer_bias_m",
+      "paths": ["sensor_model.barometer_bias_m"],
+      "distribution": "uniform",
+      "minimum": -3.0,
+      "maximum": 3.0,
+      "units": "m",
+      "status": "PROVISIONAL - venting and temperature are not characterized"
+    },
+    {
+      "name": "barometer_noise_stddev_m",
+      "paths": ["sensor_model.barometer_noise_std_dev_m"],
+      "distribution": "triangular",
+      "minimum": 0.75,
+      "mode": 1.50,
+      "maximum": 3.00,
+      "units": "m",
+      "status": "PROVISIONAL"
+    },
+    {
+      "name": "sensor_latency_s",
+      "paths": ["sensor_model.latency_s"],
+      "distribution": "uniform",
+      "minimum": 0.0,
+      "maximum": 0.06,
+      "units": "s",
+      "status": "PROVISIONAL - includes sampling, filtering, and vent response"
+    }
+  ]
+}

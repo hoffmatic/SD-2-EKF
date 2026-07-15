@@ -37,14 +37,18 @@ Current strengths:
 
 Current gaps:
 
-- No real sensor, flash, radio, or TMC5240 drivers exist yet.
-- The IMU body-axis orientation is still unknown.
+- Sensor, flash, radio, USB, and TMC5240 driver paths exist but still require
+  final-board calibration and hardware qualification.
+- The configured IMU body-axis and pad reference require verification on the
+  assembled rocket; the firmware does not yet rotate acceleration using
+  attitude.
 - The airbrake mechanism travel, step/mm, homing method, and current limit are
   still only partly known. The report gives about 1 inch of concept travel and
   about 1.5 lead-screw rotations, but final step/mm and current limits are still
   placeholders.
-- The embedded apogee predictor is still ballistic, although RocketPy now
-  supplies an external drag-aware physics reference.
+- Production `ambar_flight.c` contains both ballistic comparison output and a
+  provisional drag-aware vertical predictor. Its mass/CdA/density inputs are
+  not yet calibrated.
 - Final RocketPy mass properties and drag curves remain provisional.
 - The M5 2.4 GHz requirement matches the SX1280 hardware.
 - The airbrake PCB uses a magnetometer; independent recovery GPS remains a
@@ -90,14 +94,16 @@ What it does:
   J420R thrust, variable motor mass,
   aerodynamic drag, rail departure, and 6-DOF trajectory integration.
 - Applies deterministic provisional sensor bias, noise, quantization,
-  saturation, and latency before feeding measurements into the real C++
-  `AmbarFlightComputer` through `ambar_controller_bridge`.
+  saturation, and latency to a pad-referenced RocketPy body-axis channel before
+  feeding the production STM32 C estimator/controller through
+  `ambar_stm32_controller_bridge`.
 - Generates barometer measurements only at the configured barometer cadence;
   non-sample controller ticks are stored as null rather than fake readings.
-- Applies the C++ deployment command to rate-limited RocketPy airbrakes.
+- Applies the production STM32-C deployment command to delayed, rate-limited
+  RocketPy airbrakes.
 - Verifies that deployment starts only after the J420R burn time plus the
-  configured post-burn margin and only while the controller reports
-  `AirbrakeActive`.
+  configured acceptance margin and only while the controller reports `Coast`
+  or `AirbrakeActive`.
 - Compares passive apogee against the M5 OpenRocket decision-matrix value.
 - Checks the M5 Mach and rail-exit requirements.
 - Continues through a short post-apogee controller-only observation window to
@@ -109,13 +115,15 @@ What it does:
   timestamp ordering, command bounds, sensor cadence, and phase coverage.
 
 The current model uses June 2 OpenRocket geometry but retains provisional dry
-mass, inertia, center of mass, and drag. It predicts 3851 ft passive versus the
-3379 ft report value and 42.7 ft/s rail exit versus the 52 ft/s minimum, so both
-checks fail visibly. Closed-loop apogee is 2973 ft, but that is not independent
-accuracy evidence while the source-model checks fail.
+mass, inertia, center of mass, and drag. The current nominal production-C run
+predicts 3829 ft AGL passive versus the 3379 ft report value and 42.7 ft/s rail
+exit versus the 52 ft/s minimum, so both checks fail visibly. Closed loop is
+3327 ft AGL, 327 ft above target; this is not validated accuracy evidence.
 
-The bridge configures a 1.74 s minimum boost interval and checks that deployment
-does not begin before that time. The current first command occurs at 1.82 s.
+The bridge uses the fixed production default 0.50 s minimum-boost setting. The
+independent safety check still prohibits command before true 1.64 s burnout
+plus the 0.10 s margin. The current first command occurs near 4.42 s and virtual
+motion begins near 4.52 s.
 
 ## Fault and Replay Sandbox
 
@@ -144,6 +152,29 @@ command bounds, post-burn gating, and descending inhibition. Only 15/200 fall
 inside 3000 +/-100 ft; this is an explicit calibration warning, not a
 source-backed probability estimate.
 
+This older sandbox is retained as a fast regression fixture. It is not the main
+robustness campaign because it uses the parallel C++ controller model, hardcoded
+ranges, and terminal-only output.
+
+## Production-Controller Monte Carlo Campaign
+
+Run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_monte_carlo.ps1
+```
+
+The default runs two repeated baselines and 50 seeded Latin-hypercube RocketPy
+cases through the production STM32 C estimator/controller. Each case includes a
+paired passive trajectory, sampled-input provenance, per-run CSV results,
+aggregate statistics, sensitivity ranking, strict phase-order checks, and
+representative traces for later USB/HIL replay. Planned inputs and exact binary/
+source snapshots are saved before run 1; `runs.csv` is checkpointed after every
+attempt. It does not move the motor.
+
+See [monte_carlo_campaign.md](monte_carlo_campaign.md) for the complete operator
+workflow and interpretation limits.
+
 ## Core Unit Tests
 
 Executable:
@@ -152,10 +183,10 @@ Executable:
 .\build\ambar_core_tests.exe
 ```
 
-The assertions cover timestamp recovery, invalid-value rejection, barometer
-gating, controller interlocks, fault latching/reset, and the current ballistic
-predictor contract. CMake also exposes these and the native sandboxes through
-`ctest --test-dir build --output-on-failure`.
+These legacy-C++ assertions cover timestamp recovery, invalid-value rejection,
+barometer gating, controller interlocks, fault latching/reset, and the older
+ballistic predictor contract. Production STM32-C host tests live under the
+firmware project. CMake exposes both bridge compilation and native tests.
 
 ## Flight Sandbox
 
@@ -248,7 +279,8 @@ Useful questions:
 1. Replace RocketPy placeholder mass/inertia and actuator values with measured data.
 2. Import the final OpenRocket `.ork` and drag-vs-Mach curves for cross-validation.
 3. Add plots of altitude, velocity, predicted apogee, and command to the UI.
-4. Add real sensor-driver unit tests once BMP388 and LSM6DSV32X drivers exist.
+4. Expand existing sensor-driver tests with captured hardware transactions and
+   mounting-orientation cases.
 5. Replace the synthetic replay with captured hardware logs.
 6. Add hardware-in-the-loop tests that compare these virtual checks with actual
    boot telemetry from the PCB.

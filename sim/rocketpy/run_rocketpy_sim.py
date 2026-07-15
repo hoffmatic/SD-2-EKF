@@ -1,14 +1,15 @@
-"""RocketPy physics simulation connected to the AMBAR C++ flight computer.
+"""RocketPy physics simulation connected to the AMBAR STM32 C flight core.
 
 RocketPy owns the motor, changing mass, atmosphere, aerodynamics, and 6-DOF
-trajectory. A persistent line-oriented bridge feeds virtual vertical IMU and
-barometer measurements into the same C++ estimator/controller used by the
-desktop sandboxes. The returned deployment command drives RocketPy airbrakes.
+trajectory. A persistent line-oriented bridge feeds a virtual pad-referenced
+body-axis IMU channel and barometer measurements into the production C
+estimator/controller compiled from the STM32 project. The returned deployment
+command drives RocketPy airbrakes.
 
 Architecture connections:
 - ambar_reference_config.json supplies the versioned vehicle/model inputs.
 - j420r.eng supplies the motor thrust curve.
-- sim/controller_bridge.cpp exposes the shared C++ flight logic as a process.
+- sim/stm32_controller_bridge.c exposes the production STM32 flight logic.
 - scripts/run_rocketpy_sim.ps1 builds the bridge and launches this module.
 - build/rocketpy-last-run.json is the detailed machine-readable output.
 
@@ -21,8 +22,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import queue
 import random
 import subprocess
+import threading
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +41,8 @@ RESULT_PATH = ROOT / "build" / "rocketpy-last-run.json"
 METERS_TO_FEET = 3.280839895
 FEET_TO_METERS = 1.0 / METERS_TO_FEET
 MPS_TO_FPS = METERS_TO_FEET
+STANDARD_GRAVITY_MPS2 = 9.80665
+BRIDGE_RESPONSE_TIMEOUT_S = 2.0
 
 
 @dataclass
@@ -53,7 +58,7 @@ class BridgeState:
 
 
 class SensorModel:
-    """Deterministic provisional sensor errors applied before the C++ bridge."""
+    """Deterministic provisional sensor errors applied before the C bridge."""
 
     def __init__(self, config: dict[str, Any]) -> None:
         self.values = config["sensor_model"]
@@ -82,8 +87,45 @@ class SensorModel:
         return self._quantize(value, self.values["barometer_resolution_m"])
 
 
+def rocket_body_z_axis(state: list[float]) -> tuple[float, float, float]:
+    """Return RocketPy's body-Z/longitudinal axis in inertial coordinates."""
+
+    e0, e1, e2, e3 = map(float, state[6:10])
+    return (
+        2.0 * (e1 * e3 + e0 * e2),
+        2.0 * (e2 * e3 - e0 * e1),
+        e0 * e0 - e1 * e1 - e2 * e2 + e3 * e3,
+    )
+
+
+def pad_referenced_body_axis_acceleration(
+    acceleration_world_mps2: tuple[float, float, float],
+    body_z_axis: tuple[float, float, float],
+    pad_reference_specific_force_mps2: float,
+) -> float:
+    """Model the scalar acceleration channel currently used by the firmware.
+
+    A real accelerometer measures specific force along the configured body axis.
+    ``rocket_sensors.c`` subtracts the pad reference and currently performs no
+    attitude rotation.  Projecting RocketPy's world acceleration into body Z
+    preserves that contract and exposes wind/tilt effects instead of supplying
+    unrealistically perfect world-vertical acceleration to the EKF.
+    """
+
+    specific_force_world = (
+        acceleration_world_mps2[0],
+        acceleration_world_mps2[1],
+        acceleration_world_mps2[2] + STANDARD_GRAVITY_MPS2,
+    )
+    projected_specific_force = sum(
+        component * axis
+        for component, axis in zip(specific_force_world, body_z_axis)
+    )
+    return projected_specific_force - pad_reference_specific_force_mps2
+
+
 class ControllerBridge:
-    """Own the persistent C++ child process and its line protocol."""
+    """Own the persistent production-C child process and its line protocol."""
 
     def __init__(
         self,
@@ -92,6 +134,7 @@ class ControllerBridge:
         target_apogee_m: float,
         target_tolerance_m: float,
     ) -> None:
+        self._failure: str | None = None
         self.process = subprocess.Popen(
             [
                 str(executable),
@@ -109,14 +152,43 @@ class ControllerBridge:
             encoding="utf-8",
             bufsize=1,
         )
+        self._responses: queue.Queue[str | None] = queue.Queue()
+        self._reader = threading.Thread(
+            target=self._read_responses,
+            name="ambar-controller-bridge-reader",
+            daemon=True,
+        )
+        self._reader.start()
         self.state = self._exchange("RESET 0")
 
+    def _read_responses(self) -> None:
+        """Move blocking pipe reads to one daemon thread with EOF signaling."""
+
+        if self.process.stdout is None:
+            self._responses.put(None)
+            return
+        for line in self.process.stdout:
+            self._responses.put(line)
+        self._responses.put(None)
+
     def _exchange(self, command: str) -> BridgeState:
-        if self.process.stdin is None or self.process.stdout is None:
+        if self.process.stdin is None:
             raise RuntimeError("Controller bridge pipes are unavailable.")
         self.process.stdin.write(command + "\n")
         self.process.stdin.flush()
-        response = self.process.stdout.readline().strip()
+        try:
+            response_line = self._responses.get(timeout=BRIDGE_RESPONSE_TIMEOUT_S)
+        except queue.Empty as error:
+            self._failure = (
+                f"controller bridge timed out after {BRIDGE_RESPONSE_TIMEOUT_S:.1f} s"
+            )
+            self.process.kill()
+            self.process.wait(timeout=2)
+            raise TimeoutError(self._failure) from error
+        if response_line is None:
+            self._failure = "controller bridge closed its output unexpectedly"
+            raise RuntimeError(self._failure)
+        response = response_line.strip()
         if not response.startswith("STATE "):
             raise RuntimeError(f"Controller bridge returned: {response or '<no output>'}")
         values = response.split(maxsplit=8)
@@ -149,6 +221,8 @@ class ControllerBridge:
         )
 
     def close(self) -> None:
+        if self._failure is not None:
+            return
         if self.process.poll() is None and self.process.stdin is not None:
             try:
                 self.process.stdin.write("QUIT\n")
@@ -161,12 +235,27 @@ class ControllerBridge:
             raise RuntimeError(f"Controller bridge exited with {self.process.returncode}: {error}")
 
 
-def deep_merge(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
-    """Merge a validated override tree without mutating the baseline config."""
+def deep_merge(
+    base: dict[str, Any],
+    overrides: dict[str, Any],
+    prefix: str = "",
+) -> dict[str, Any]:
+    """Merge known override keys without mutating the baseline config.
+
+    A misspelled key must stop a study instead of appearing in the provenance
+    hash while having no effect on RocketPy.  Numeric int/float substitutions
+    remain allowed because JSON has only one practical number contract here.
+    """
+
     merged = dict(base)
     for key, value in overrides.items():
+        path = f"{prefix}.{key}" if prefix else key
+        if key not in base:
+            raise ValueError(f"Unknown simulation override key: {path}")
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            merged[key] = deep_merge(merged[key], value)
+            merged[key] = deep_merge(merged[key], value, path)
+        elif isinstance(value, dict) or isinstance(merged.get(key), dict):
+            raise ValueError(f"Simulation override type mismatch at: {path}")
         else:
             merged[key] = value
     return merged
@@ -182,6 +271,18 @@ def load_config(overrides_path: Path | None = None) -> dict[str, Any]:
     config = deep_merge(config, overrides)
     config["model_status"] += " with explicit experimental overrides"
     return config
+
+
+def flight_apogee_agl_m(flight: Flight, config: dict[str, Any]) -> float:
+    """Convert RocketPy's absolute launch-site z coordinate to pad-relative AGL.
+
+    Mission targets, OpenRocket comparisons, firmware estimates, and exported
+    truth channels are all above-ground-level values.  RocketPy's ``apogee``
+    property includes the site's elevation, so comparing it directly would add
+    23 ft at the current launch site and can flip a boundary acceptance result.
+    """
+
+    return float(flight.apogee) - float(config["environment"]["elevation_m"])
 
 
 def build_environment(config: dict[str, Any]) -> Environment:
@@ -228,6 +329,15 @@ def build_motor(config: dict[str, Any]) -> SolidMotor:
         nozzle_position=0.0,
         burn_time=values["burn_time_s"],
         throat_radius=0.007,
+        # Preserve the certified curve shape while allowing an explicitly
+        # recorded burn-time/total-impulse dispersion to affect the plant.  A
+        # bare burn_time argument is ignored when it exceeds the source curve;
+        # reshaping prevents a CSV column from claiming variation that RocketPy
+        # did not actually apply.
+        reshape_thrust_curve=(
+            values["burn_time_s"],
+            values["total_impulse_ns"],
+        ),
         coordinate_system_orientation="nozzle_to_combustion_chamber",
     )
 
@@ -287,7 +397,7 @@ def run_closed_loop(
     bridge_path: Path,
     observation_end_time_s: float,
 ) -> tuple[Flight, list[dict[str, Any]]]:
-    """Run RocketPy while the persistent C++ controller commands airbrakes.
+    """Run RocketPy while the production STM32 C controller commands airbrakes.
 
     The closed-loop run continues briefly after apogee. This does not model the
     recovery system; it exists so the controller's Recovery transition and the
@@ -296,24 +406,32 @@ def run_closed_loop(
     environment = build_environment(config)
     rocket = build_rocket(config, build_motor(config))
     airbrake_config = config["airbrakes"]
-    minimum_boost_time_s = (
-        config["motor"]["burn_time_s"]
-        + airbrake_config["post_burn_enable_margin_s"]
-    )
     requirements = config["requirements"]
+    controller_config = config["controller"]
+    # Controller configuration is deliberately independent of RocketPy truth.
+    # Monte Carlo changes the real/virtual motor burn time, but the controller
+    # must not receive that sampled answer.  Its fixed threshold comes from the
+    # production firmware configuration and safety acceptance is evaluated
+    # separately against the randomized true burnout time.
     bridge = ControllerBridge(
         bridge_path,
-        minimum_boost_time_s,
-        requirements["target_apogee_ft"] * FEET_TO_METERS,
-        requirements["target_tolerance_ft"] * FEET_TO_METERS,
+        controller_config["minimum_boost_time_s"],
+        controller_config["target_apogee_ft"] * FEET_TO_METERS,
+        controller_config["target_tolerance_ft"] * FEET_TO_METERS,
     )
     log: list[dict[str, Any]] = []
     previous_time: float | None = None
     previous_velocity_vector = (0.0, 0.0, 0.0)
+    pad_reference_specific_force_mps2: float | None = None
     next_barometer_time = 1.0 / airbrake_config["barometer_rate_hz"]
     actual_deployment = 0.0
     sensor_model = SensorModel(config)
     truth_history: deque[tuple[float, float, float]] = deque()
+    # The virtual actuator has two distinct limitations.  Command history
+    # models electronic/mechanical dead time; move-toward below models the
+    # measured full-stroke rate.  Keeping both visible prevents an optimistic
+    # zero-delay actuator from hiding a late controller decision.
+    command_history: deque[tuple[float, float]] = deque([(0.0, 0.0)])
 
     def controller(
         time: float,
@@ -326,7 +444,8 @@ def run_closed_loop(
         controller_environment: Environment,
     ) -> tuple[float, float, float, float, str, bool] | None:
         del state_history, observed_variables, sensors
-        nonlocal previous_time, previous_velocity_vector, next_barometer_time, actual_deployment
+        nonlocal previous_time, previous_velocity_vector, next_barometer_time
+        nonlocal actual_deployment, pad_reference_specific_force_mps2
 
         if previous_time is not None and time <= previous_time + 1e-9:
             air_brakes.deployment_level = actual_deployment
@@ -336,9 +455,13 @@ def run_closed_loop(
         velocity_mps = velocity_vector_mps[2]
         speed_mps = math.sqrt(sum(component * component for component in velocity_vector_mps))
         altitude_m = max(0.0, float(state[2]) - controller_environment.elevation)
+        body_z_axis = rocket_body_z_axis(state)
         if previous_time is None:
             previous_time = time
             previous_velocity_vector = velocity_vector_mps
+            pad_reference_specific_force_mps2 = (
+                STANDARD_GRAVITY_MPS2 * body_z_axis[2]
+            )
             air_brakes.deployment_level = 0.0
             truth_history.append((time, 0.0, altitude_m))
             log.append(
@@ -348,6 +471,7 @@ def run_closed_loop(
                     "truth_velocity_mps": velocity_mps,
                     "truth_speed_mps": speed_mps,
                     "truth_acceleration_mps2": 0.0,
+                    "truth_sensor_axis_acceleration_mps2": 0.0,
                     "truth_acceleration_magnitude_mps2": 0.0,
                     "measured_acceleration_mps2": 0.0,
                     "measured_altitude_m": None,
@@ -358,6 +482,7 @@ def run_closed_loop(
                     "predicted_apogee_m": bridge.state.predicted_apogee_m,
                     "command_fraction": 0.0,
                     "desired_deployment_fraction": 0.0,
+                    "delayed_desired_deployment_fraction": 0.0,
                     "actual_deployment_fraction": 0.0,
                     "inhibit": bridge.state.inhibit,
                     "inhibit_flags": bridge.state.inhibit_flags,
@@ -376,8 +501,15 @@ def run_closed_loop(
             acceleration_magnitude_mps2 = math.sqrt(
                 sum(component * component for component in acceleration_vector_mps2)
             )
+            sensor_axis_acceleration_mps2 = pad_referenced_body_axis_acceleration(
+                acceleration_vector_mps2,
+                body_z_axis,
+                pad_reference_specific_force_mps2
+                if pad_reference_specific_force_mps2 is not None
+                else STANDARD_GRAVITY_MPS2 * body_z_axis[2],
+            )
 
-        truth_history.append((time, acceleration_mps2, altitude_m))
+        truth_history.append((time, sensor_axis_acceleration_mps2, altitude_m))
         delayed_time = time - config["sensor_model"]["latency_s"]
         while len(truth_history) > 1 and truth_history[1][0] <= delayed_time:
             truth_history.popleft()
@@ -401,10 +533,19 @@ def run_closed_loop(
             use_barometer=use_barometer,
         )
         desired_deployment = 0.0 if bridge_state.inhibit else bridge_state.deploy_fraction
+        command_history.append((time, desired_deployment))
+        delayed_command_time = time - airbrake_config.get("actuator_delay_s", 0.0)
+        while len(command_history) > 1 and command_history[1][0] <= delayed_command_time:
+            command_history.popleft()
+        delayed_desired_deployment = (
+            command_history[0][1]
+            if command_history[0][0] <= delayed_command_time
+            else 0.0
+        )
         maximum_change = airbrake_config["maximum_rate_fraction_per_s"] * dt_s
         actual_deployment += max(
             -maximum_change,
-            min(maximum_change, desired_deployment - actual_deployment),
+            min(maximum_change, delayed_desired_deployment - actual_deployment),
         )
         actual_deployment = max(0.0, min(1.0, actual_deployment))
         air_brakes.deployment_level = actual_deployment
@@ -416,6 +557,7 @@ def run_closed_loop(
                 "truth_velocity_mps": velocity_mps,
                 "truth_speed_mps": speed_mps,
                 "truth_acceleration_mps2": acceleration_mps2,
+                "truth_sensor_axis_acceleration_mps2": sensor_axis_acceleration_mps2,
                 "truth_acceleration_magnitude_mps2": acceleration_magnitude_mps2,
                 "measured_acceleration_mps2": measured_acceleration_mps2,
                 "measured_altitude_m": measured_altitude_m,
@@ -426,6 +568,7 @@ def run_closed_loop(
                 "predicted_apogee_m": bridge_state.predicted_apogee_m,
                 "command_fraction": bridge_state.deploy_fraction,
                 "desired_deployment_fraction": desired_deployment,
+                "delayed_desired_deployment_fraction": delayed_desired_deployment,
                 "actual_deployment_fraction": actual_deployment,
                 "inhibit": bridge_state.inhibit,
                 "inhibit_flags": bridge_state.inhibit_flags,
@@ -448,7 +591,11 @@ def run_closed_loop(
         drag_coefficient_curve=lambda deployment, mach: (
             airbrake_config["drag_coefficient_at_full_deployment"]
             * deployment
-            * (1.0 + 0.10 * min(max(mach, 0.0), 1.0))
+            * (
+                1.0
+                + airbrake_config["mach_drag_multiplier_at_mach_1"]
+                * min(max(mach, 0.0), 1.0)
+            )
         ),
         controller_function=controller,
         sampling_rate=airbrake_config["sampling_rate_hz"],
@@ -504,6 +651,7 @@ def validate_controller_log(log: list[dict[str, Any]]) -> list[str]:
         "truth_velocity_mps",
         "truth_speed_mps",
         "truth_acceleration_mps2",
+        "truth_sensor_axis_acceleration_mps2",
         "truth_acceleration_magnitude_mps2",
         "measured_acceleration_mps2",
         "measurement_source_time_s",
@@ -512,6 +660,7 @@ def validate_controller_log(log: list[dict[str, Any]]) -> list[str]:
         "predicted_apogee_m",
         "command_fraction",
         "desired_deployment_fraction",
+        "delayed_desired_deployment_fraction",
         "actual_deployment_fraction",
     )
     previous_time = -math.inf
@@ -571,7 +720,7 @@ def main() -> int:
         raise SystemExit(f"Controller bridge is missing: {args.bridge}")
 
     print("AMBAR RocketPy physics sandbox")
-    print("Purpose: run RocketPy trajectory physics while the existing C++ flight computer commands the virtual airbrakes.")
+    print("Purpose: run RocketPy trajectory physics while the production STM32 C flight computer commands the virtual airbrakes.")
     print(f"RocketPy version: 1.12.1")
     print(f"Model status: {config['model_status']}")
     print(f"Input mode: {'EXPERIMENTAL OVERRIDES' if args.overrides else 'REPORT BASELINE'}")
@@ -585,7 +734,16 @@ def main() -> int:
     print(f"  power-on drag coefficient: {config['rocket']['power_on_drag_coefficient']:.3f}")
     print(f"  power-off drag coefficient: {config['rocket']['power_off_drag_coefficient']:.3f}")
     print(f"  full-deployment airbrake drag coefficient: {config['airbrakes']['drag_coefficient_at_full_deployment']:.3f}")
+    print(
+        "  airbrake Mach-1 drag multiplier: "
+        f"{100.0 * config['airbrakes']['mach_drag_multiplier_at_mach_1']:.1f}%"
+    )
+    print(
+        "  fixed controller minimum boost time: "
+        f"{config['controller']['minimum_boost_time_s']:.2f} s"
+    )
     print(f"  maximum deployment rate: {config['airbrakes']['maximum_rate_fraction_per_s'] * 100.0:.1f} percent/s")
+    print(f"  actuator command delay: {config['airbrakes'].get('actuator_delay_s', 0.0) * 1000.0:.0f} ms")
     print(f"  barometer rate: {config['airbrakes']['barometer_rate_hz']:.1f} Hz")
     print(f"  accelerometer bias/noise: {config['sensor_model']['accelerometer_bias_mps2']:.2f} / {config['sensor_model']['accelerometer_noise_std_dev_mps2']:.2f} m/s^2")
     print(f"  barometer bias/noise: {config['sensor_model']['barometer_bias_m'] * METERS_TO_FEET:.2f} / {config['sensor_model']['barometer_noise_std_dev_m'] * METERS_TO_FEET:.2f} ft")
@@ -601,8 +759,8 @@ def main() -> int:
         observation_end_time_s,
     )
 
-    passive_apogee_ft = passive.apogee * METERS_TO_FEET
-    closed_apogee_ft = closed.apogee * METERS_TO_FEET
+    passive_apogee_ft = flight_apogee_agl_m(passive, config) * METERS_TO_FEET
+    closed_apogee_ft = flight_apogee_agl_m(closed, config) * METERS_TO_FEET
     target_ft = requirements["target_apogee_ft"]
     tolerance_ft = requirements["target_tolerance_ft"]
     reference_ft = requirements["m5_openrocket_passive_apogee_ft"]
@@ -637,7 +795,7 @@ def main() -> int:
         and first_command["time_s"] + 1.0e-9 >= minimum_deploy_time_s
     )
     command_phases_valid = all(
-        entry["phase"] == "AirbrakeActive"
+        entry["phase"] in {"Coast", "AirbrakeActive"}
         for entry in controller_log
         if entry["command_fraction"] > 0.001
     )
@@ -719,29 +877,29 @@ def main() -> int:
     )
     print_case(
         2,
-        "C++ closed-loop airbrakes",
-        "RocketPy feeds trajectory-derived IMU/barometer values to the persistent C++ AMBAR flight computer, then applies its bounded command to rate-limited virtual airbrakes.",
-        "PASS if the estimator stays healthy, commands remain bounded, deployment starts after motor burnout plus the configured margin, commands occur only in AirbrakeActive, and deployment reduces apogee by more than 50 ft.",
+        "STM32-C closed-loop airbrakes",
+        "RocketPy feeds a pad-referenced body-axis IMU channel and delayed/noisy barometer values to the production STM32 C AMBAR flight computer, then applies its bounded command to delayed, rate-limited virtual airbrakes.",
+        "PASS if the estimator stays healthy, commands remain bounded, deployment starts after motor burnout plus the configured margin, commands occur only in Coast/AirbrakeActive, and deployment reduces apogee by more than 50 ft.",
         coupling_pass,
-        "The real C++ controller remained healthy and changed the RocketPy trajectory." if coupling_pass else "The C++/RocketPy coupling did not meet the declared behavior check.",
+        "The production C controller remained healthy and changed the RocketPy trajectory." if coupling_pass else "The STM32-C/RocketPy coupling did not meet the declared behavior check.",
         {
             "closed-loop apogee": f"{closed_apogee_ft:.0f} ft",
             "target error": f"{target_error_ft:+.0f} ft",
             "apogee reduction": f"{apogee_reduction_ft:.0f} ft",
-            "C++ command range": (
+            "STM32-C command range": (
                 f"{minimum_command * 100.0:.1f}% to {peak_command * 100.0:.1f}%"
             ),
-            "physical deployment range": (
+            "virtual deployment range": (
                 f"{minimum_deployment * 100.0:.1f}% to {peak_deployment * 100.0:.1f}%"
             ),
             "motor burn end": f"{config['motor']['burn_time_s']:.2f} s",
-            "minimum deploy time": f"{minimum_deploy_time_s:.2f} s",
-            "first C++ command": (
+            "independent safety enable time": f"{minimum_deploy_time_s:.2f} s",
+            "first STM32-C command": (
                 f"{first_command['time_s']:.2f} s"
                 if first_command is not None
                 else "not reached"
             ),
-            "first physical deployment": (
+            "first virtual deployment": (
                 f"{first_deployment['time_s']:.2f} s"
                 if first_deployment is not None
                 else "not reached"
@@ -865,19 +1023,21 @@ def main() -> int:
                 "phaseTransitions": phase_transitions,
                 "seriesMetadata": {
                     "truth": "RocketPy trajectory state sampled at the controller callback rate.",
-                    "sensor": "Deterministic delayed, biased, noisy, quantized virtual measurements supplied to the C++ bridge.",
-                    "estimate": "State produced by the repository's C++ vertical EKF.",
+                    "sensor": "Deterministic delayed, biased, noisy, quantized virtual measurements supplied to the production-C bridge.",
+                    "estimate": "State produced by the STM32 project's production vertical EKF.",
                     "truth_acceleration_mps2": "Net vertical acceleration in the launch/navigation frame, positive upward.",
-                    "measured_acceleration_mps2": "Virtual launch-frame vertical acceleration after assumed IMU alignment and gravity compensation; this is not raw body-axis specific force.",
+                    "truth_sensor_axis_acceleration_mps2": "Pad-referenced RocketPy body-Z acceleration before sensor bias, noise, quantization, and latency.",
+                    "measured_acceleration_mps2": "Virtual configured-body-axis channel after pad subtraction and provisional sensor errors; raw registers, vibration, and mounting error are not modeled.",
                     "measured_altitude_m": "Barometric altitude sample. Null means the barometer was not sampled on that controller tick.",
-                    "command_fraction": "C++ controller request before actuator rate limiting.",
+                    "command_fraction": "Production STM32-C controller request before actuator delay and rate limiting.",
+                    "delayed_desired_deployment_fraction": "Controller request after the configured command-to-motion delay and before rate limiting.",
                     "actual_deployment_fraction": "Deployment applied to RocketPy after the configured actuator rate limit.",
                 },
                 "limitations": [
                     "Mass, center of gravity, inertia, rocket drag, and airbrake drag remain provisional.",
-                    "The virtual accelerometer starts from gravity-compensated launch-frame vertical acceleration; raw three-axis IMU, attitude estimation, axis misalignment, and vibration are not modeled.",
+                    "The virtual accelerometer projects RocketPy motion into body Z and subtracts its pad reference; raw registers, mounting error, vibration, and firmware attitude rotation are not modeled.",
                     "The post-apogee window does not model parachutes, recovery electronics, landing, or deployment loads.",
-                    "The embedded apogee predictor is ballistic and is not calibrated to the provisional RocketPy drag model.",
+                    "The embedded drag-aware vertical apogee predictor retains provisional mass, CdA, density, and effectiveness values and is not calibrated to the RocketPy model.",
                 ],
                 "logIntegrityErrors": log_integrity_errors,
                 "controllerLog": controller_log,
@@ -892,7 +1052,7 @@ def main() -> int:
     print("scenario                     result")
     print("-----------------------------------")
     print(f"M5 passive reference         {'PASS' if passive_pass else 'FAIL'}")
-    print(f"C++ closed-loop airbrakes    {'PASS' if coupling_pass else 'FAIL'}")
+    print(f"STM32-C closed-loop brakes   {'PASS' if coupling_pass else 'FAIL'}")
     print(f"Closed-loop target           {'PASS' if target_pass else 'FAIL'}")
     print(f"M5 flight envelope checks    {'PASS' if envelope_pass else 'FAIL'}")
     print(f"Flight-data integrity        {'PASS' if time_history_pass else 'FAIL'}")

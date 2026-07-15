@@ -1,6 +1,6 @@
 # Simulation Engineering Audit
 
-Audit date: June 14, 2026
+Audit updated: July 15, 2026
 
 ## Overall Assessment
 
@@ -14,14 +14,16 @@ The initial audit defects were corrected, and this update adds:
 1. The native flight, electronics, and actuator sandboxes now return a nonzero
    process exit code when any printed scenario fails. Terminal scripts and
    future CI can therefore enforce the results.
-2. RocketPy previously commanded airbrakes at 1.53 s even though the J420R
-   thrust curve ends at 1.64 s. The bridge now uses the motor burn time plus a
-   0.10 s margin, and the pass rule checks command time and flight phase.
+2. RocketPy now uses fixed production controller configuration while an
+   independent gate checks every command against randomized true motor burnout
+   plus margin. The nominal first command is about 4.42 s.
 3. Formal CTest assertions for estimator timing, invalid values, innovation
    gating, controller interlocks, fault latching, and the ballistic predictor.
 4. Dedicated fault/replay and fixed-seed Monte Carlo sandboxes.
-5. Report-backed constant wind plus deterministic sensor bias, noise,
-   quantization, saturation, and latency in the RocketPy bridge.
+5. Report-backed wind plus a pad-referenced body-axis IMU model, deterministic
+   sensor errors, actuator delay/rate, and closed trajectory feedback.
+6. A separate two-baseline plus 50-case seeded Latin-hypercube campaign writes
+   checkpointed CSV evidence and exact input/binary snapshots.
 
 The June 14 M5 report was subsequently extracted. It reports 3379 ft passive
 apogee for the current OpenRocket design, while the older full-report copy used
@@ -34,21 +36,22 @@ remaining calibrated to the superseded design.
 | Suite | Why It Exists | What It Currently Proves | What It Does Not Prove |
 | --- | --- | --- | --- |
 | Flight sandbox | Fast repeatable estimator/controller regression | Noise, fixed bias, one barometer spike, actuator lag, weak-motor inhibition | Real aerodynamics, body-axis conversion, hardware drivers, target accuracy |
-| Electronics sandbox | Review intended boot and arming policy before drivers exist | Static IDs, addresses, bus modes, pin uniqueness, and selected fault decisions | Actual bus transactions, power transients, RF link budget, flash throughput, thermal behavior |
+| Electronics sandbox | Review boot and arming policy apart from hardware | Static IDs, addresses, bus modes, pin uniqueness, and selected fault decisions | Actual bus transactions, power transients, RF link budget, flash throughput, thermal behavior |
 | Actuator sandbox | Exercise the `AirbrakeCommand` consumer contract | Homing gate, rate limit, retract behavior, simple jam/current fault | Motor torque, lead-screw load, backlash, friction, thermal limits, real stall-detection delay |
 | Fault/replay sandbox | Make failure policy and replay reproducibility explicit | Duplicate timestamps, NaN containment, barometer dropout propagation, deterministic synthetic-log replay | Driver freshness checks, raw hardware logs, scheduler faults |
 | Monte Carlo sandbox | Regress safety behavior across deterministic dispersion | 200 fixed-seed trials with varied provisional thrust, drag, sensors, and actuator rate | Source-backed probability of mission success or 6-DOF uncertainty |
-| RocketPy sandbox | Couple six-degree-of-freedom trajectory physics to the real C++ controller | Wind, provisional sensor errors, persistent bridge, post-burn command gating, bounded deployment, trajectory response, reference envelope, Recovery entry, retraction | Independent apogee accuracy, measured sensor behavior, source-backed uncertainty distribution, parachute/recovery-system dynamics |
+| RocketPy sandbox | Couple six-degree-of-freedom trajectory physics to production STM32-C flight modules | Wind, body-axis provisional sensors, persistent bridge, independent post-burn gating, bounded deployment, trajectory response, Recovery, retraction | Independent apogee accuracy, measured sensor behavior, source-backed distributions, parachute/recovery dynamics |
+| Production Monte Carlo | Screen repeated closed-loop behavior with reproducible randomized truth | Seeded Latin-hypercube coverage, paired passive/control results, safety/performance gates, checkpoints, CSV/provenance | Flight qualification, board equivalence, or rare-event reliability proof |
 | Browser console | Make suite output reviewable by the team | Launches the same scripts and exposes conditions, rules, and results | Independent verification; it parses text emitted by the simulations |
 
 ## Open Findings
 
 ### High Priority
 
-- RocketPy now applies provisional deterministic bias, noise, quantization,
-  saturation, and 20 ms latency. These are model assumptions, not measured
-  sensor performance. Axis rotation and gravity-compensation error remain
-  outside the model.
+- RocketPy now projects acceleration into body Z, subtracts the pad reference,
+  and applies provisional bias, noise, quantization, saturation, and latency.
+  These remain assumptions; vibration, mounting error, and raw device behavior
+  are outside the model.
 - The June 2 OpenRocket body/nose/fin geometry is now reflected in RocketPy.
   Placeholder mass, inertia, center of mass, and drag still prevent agreement
   with the 3379 ft reported reference, so the mismatch remains a failed check.
@@ -59,10 +62,10 @@ remaining calibrated to the superseded design.
 - The native fixed-seed Monte Carlo now checks deterministic safety invariants.
   Its 15/200 target-hit count is informational because the 1-D model and input
   distributions are provisional; it is not a mission-success probability.
-- The embedded apogee predictor is ballistic. In the current RocketPy run its
-  prediction is more than 600 m above eventual apogee near the end of boost,
-  then becomes accurate later in coast. Controller success currently depends on
-  placeholder airbrake drag and should not be treated as tuned flight behavior.
+- Production firmware exposes both ballistic comparison output and a
+  provisional drag-aware vertical predictor. Controller behavior still depends
+  on placeholder mass, CdA, density, effectiveness, and airbrake drag, so it is
+  not tuned flight evidence.
 
 ### Medium Priority
 
@@ -134,11 +137,11 @@ next large increase in confidence will come from measured configuration data,
 Monte Carlo dispersion, and sensor/actuator hardware-in-the-loop tests.
 
 With the June 14 report inputs applied, the current RocketPy cross-check is
-openly failing: 3851 ft simulated passive apogee versus 3379 ft reported, and
+openly failing: 3829 ft AGL simulated passive apogee versus 3379 ft AGL reported, and
 42.7 ft/s simulated rail exit versus the 52 ft/s requirement and 75.5 ft/s
-reported result. The controller produces 2973 ft inside that provisional model,
-but this cannot be used as target-accuracy evidence until the passive vehicle
-model is reconciled.
+reported result. The production controller produces 3327 ft AGL (+327 ft target
+error) inside that provisional model. This cannot be used as target-accuracy
+evidence until the passive vehicle model is reconciled.
 
 ## Project Data Request
 
@@ -173,10 +176,11 @@ unknown rather than estimated silently.
 
 ## RocketPy Capabilities Available For The Next Stage
 
-RocketPy 1.12.1 already provides supported paths for airbrake drag curves,
-sensor objects, Monte Carlo dispersion, and exported flight results. The next
-stage should use those library features rather than creating parallel physics
-or randomization frameworks in this repository.
+RocketPy 1.12.1 provides supported paths for airbrake drag curves, sensor
+objects, and exported flight results. The implemented campaign keeps RocketPy
+as the single physics engine and adds a small seeded Latin-hypercube
+orchestration layer for fixed-controller pairing, checkpointing, and the exact
+CSV/provenance contract required by this project.
 
 - Airbrake controller and drag-curve interface:
   <https://docs.rocketpy.org/en/latest/user/airbrakes.html>

@@ -33,15 +33,23 @@
     "dry_mass_kg": 0.27328,
     "propellant_mass_kg": 0.37632,
     "burn_time_s": 1.64,
+    "total_impulse_ns": 651.222182,
     "position_m": 0.0
   },
   "airbrakes": {
     "sampling_rate_hz": 100.0,
     "post_burn_enable_margin_s": 0.10,
     "maximum_rate_fraction_per_s": 1.55,
+    "actuator_delay_s": 0.10,
     "drag_coefficient_at_full_deployment": 0.95,
+    "mach_drag_multiplier_at_mach_1": 0.10,
     "barometer_rate_hz": 50.0,
     "post_apogee_observation_s": 2.0
+  },
+  "controller": {
+    "minimum_boost_time_s": 0.50,
+    "target_apogee_ft": 3000.0,
+    "target_tolerance_ft": 100.0
   },
   "sensor_model": {
     "random_seed": 424242,
@@ -74,13 +82,16 @@
     "stabilizing_fins": "M5 fin-flutter tables: 3 fins, 6 in root chord, 2 in tip chord, 3 in span, 0.125 in thickness",
     "motor": "M5 report decision matrix: AeroTech J420R; thrust curve from ThrustCurve.org certified public-domain RASP data",
     "motor_burn_time": "J420R thrust-curve endpoint: 1.64 s; deployment is gated for an additional 0.10 s",
+    "controller_configuration": "FIXED across Monte Carlo cases; minimum boost time is the current AmbarFlight_DefaultConfig value and target/tolerance match the compiled mission defaults",
     "target_apogee": "M5 SR 1.1 and AIR 6.1",
     "passive_apogee": "June 14 M5 requirement-validation table reports 3379 ft; the June 11 full-report copy contains an older 4005 ft design result",
     "airbrake_load": "M5 drag table reports 54.8215 N per fin and 219.286 N for four airbrake fins at 197.206 m/s",
     "dry_mass": "PLACEHOLDER - replace with measured flight-ready mass",
     "inertia_and_center_of_mass": "PLACEHOLDER - replace with CAD/OpenRocket mass properties",
     "rocket_drag": "PLACEHOLDER - calibrate from the final OpenRocket drag-vs-Mach export",
-    "airbrake_drag": "PLACEHOLDER - replace with CFD/wind-tunnel drag coefficient vs Mach and deployment",
+    "airbrake_drag": "PLACEHOLDER - replace with CFD/wind-tunnel CdA versus Mach and deployment",
+    "airbrake_mach_scaling": "PLACEHOLDER - 0.10 means a linear 10 percent increase from Mach 0 to Mach 1; randomized by the screening study until measured",
+    "actuator_delay": "PROVISIONAL - replace with command-to-loaded-motion bench measurements",
     "sensor_noise": "PROVISIONAL - LSM6DSV32X +/-32 g resolution is datasheet-backed; bias, white noise, barometer error, and latency require bench calibration",
     "rail_buttons": "PLACEHOLDER - positions retained from the earlier RocketPy model until measured from the current assembly"
   }

@@ -27,7 +27,7 @@ That gives you a local copy of the project on your computer. If the team updates
 GitHub later and you are not using Git yet, repeat the same download steps to get
 the newest copy.
 
-## The Easiest Way To Run Every Simulation On Windows
+## The Easiest Way To Run The Quick Verification Set On Windows
 
 1. Open the project folder you downloaded.
 2. Hold `Shift`, right-click an empty spot in the folder, and choose
@@ -42,7 +42,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run_all_simulations.ps1
 
 The first run may take a few minutes because it creates a private Python
 environment inside the project and installs RocketPy. The script then builds
-and runs everything currently useful on a normal computer:
+and runs the fast checks plus one closed-loop trajectory:
 
 - `rocket_airbrake_ekf.exe`: small demo of the flight computer logic.
 - `sim_flight_sandbox.exe`: simulated rocket flight behavior.
@@ -54,7 +54,12 @@ and runs everything currently useful on a normal computer:
   safety and report how often the provisional model reaches the target band.
 - `ambar_core_tests.exe`: focused checks of estimator and controller rules.
 - `RocketPy physics sandbox`: a six-degree-of-freedom rocket trajectory whose
-  virtual airbrakes are commanded by the real C++ AMBAR estimator/controller.
+  virtual airbrakes are commanded by production STM32-C EKF/flight modules.
+
+The longer production robustness campaign is separate. Double-click
+`Run Monte Carlo Simulation.cmd` to run two baseline repeats and 50 randomized
+cases and write the results to CSV. Expect it to take several minutes; see
+`docs\monte_carlo_campaign.md` for interpretation.
 
 ## The Easiest Way To Use The Visual Interface
 
@@ -109,6 +114,7 @@ M5 report still requires a separate GPS device in the rocket recovery system.
 - `docs\hardware_map.md`: how the current PCB parts and STM32 pins map to code.
 - `docs\datasheet_integration_notes.md`: datasheet facts reflected in code.
 - `docs\simulation_sandboxes.md`: deeper explanation of the sandboxes.
+- `docs\monte_carlo_campaign.md`: repeated simulation, CSV, and robustness guide.
 - `docs\sensor_architecture.md`: why the magnetometer and recovery GPS are
   separate subsystems.
 - `docs\m5_report_change_guide.md`: exact report corrections for you to make
@@ -116,10 +122,10 @@ M5 report still requires a separate GPS device in the rocket recovery system.
 
 ## If Something Fails
 
-If the script says it cannot find a C++ compiler, that means the computer does
-not yet have the tool needed to build the code. Send the exact error text to the
-team maintainer. The code is still there; the computer just needs the build tool
-installed or configured.
+If the script says it cannot find a C or C++ compiler, the computer does not yet
+have the toolchain needed to build the production bridge and native sandboxes.
+Send the exact error text to the team maintainer. The code is still there; the
+computer just needs the build tool installed or configured.
 
 If a sandbox prints a failure in its table, read the `notes` or `reason` column.
 That is the simulated problem the software caught.
