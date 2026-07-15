@@ -1,34 +1,38 @@
 /*
- * PROJECT FILE OVERVIEW
- * Comment made: 2026-07-07 17:44:48 -04:00
+ * AMBAR SX1280 BOARD PORT - IMPLEMENTATION
  *
- * What this file does:
- *   This file is the Airbrake PCB-specific SX1280 port layer. It controls chip select, reset, BUSY, and SPI1 transfers.
+ * Purpose
+ *   Binds the generic SX1280 modem driver to the Airbrake PCB's Cube-generated
+ *   SPI1 handle and LORA control pins.  All direct GPIO/SPI HAL calls required by
+ *   sx1280.c are intentionally concentrated here.
  *
- * Process flow:
- *   The radio driver sets CS low, sends bytes through this port, sets CS high, and waits for BUSY to clear. Reset pulses are used at startup and after timeouts.
+ * Hardware flow
+ *   PortInit establishes inactive control levels.  A modem transaction waits for
+ *   BUSY low, drives active-low CS around PortSpiTxRx, then waits for BUSY low
+ *   again.  PortReset supplies a conservative reset pulse and settling delay for
+ *   startup or recovery.  See CODE_GUIDE.md [ARCH-6].
  *
- * Main variables and what can be changed:
- *   Timeout values inside wait and SPI calls can be tuned if radio transactions need more time. Pin assignments come from main.h.
+ * Section map
+ *   1. Cube-generated peripheral binding
+ *   2. Idle levels, chip select, and hardware reset
+ *   3. BUSY polling and blocking SPI transfer
  *
- * Assumptions:
- *   GPIO and SPI1 have already been initialized by CubeMX startup code.
- *
- * What is missing:
- *   No DMA transfer support or separate logging when BUSY timeout occurs is implemented.
+ * Safety and assumptions
+ *   MX_GPIO_Init() and MX_SPI1_Init() must run first.  Reset and SPI operations
+ *   block for bounded intervals, so normal packet flow should use the higher-level
+ *   cooperative transmit service.  CS is always returned high by the command
+ *   layer even when SPI reports an error.  Timeouts are reported to sx1280.c;
+ *   this port performs no radio reconfiguration or retry policy.  Pin changes
+ *   should be regenerated through CubeMX and reflected here, not scattered above.
  */
 
 #include "sx1280_port.h"
 
-/*
- * SX1280 Airbrake PCB port layer.
- *
- * This file contains the only direct pin/SPI knowledge needed by sx1280.c.  If
- * the PCB routing changes, update this port layer and main.h pin names instead
- * of touching the radio protocol driver.
- */
+/* ===================== CUBE-GENERATED PERIPHERAL BINDING ===================== */
 
 extern SPI_HandleTypeDef hspi1;
+
+/* ===================== IDLE LEVELS, CHIP SELECT, AND RESET ===================== */
 
 HAL_StatusTypeDef SX1280_PortInit(void)
 {
@@ -43,11 +47,13 @@ HAL_StatusTypeDef SX1280_PortInit(void)
 
 void SX1280_PortCsLow(void)
 {
+    /* Active-low CS ownership stays with sx1280_transfer(). */
     HAL_GPIO_WritePin(LORA_CS_GPIO_Port, LORA_CS_Pin, GPIO_PIN_RESET);
 }
 
 void SX1280_PortCsHigh(void)
 {
+    /* The radio must be deselected between every command transaction. */
     HAL_GPIO_WritePin(LORA_CS_GPIO_Port, LORA_CS_Pin, GPIO_PIN_SET);
 }
 
@@ -70,6 +76,8 @@ void SX1280_PortReset(void)
     HAL_Delay(20);
 }
 
+/* ===================== BUSY PACING AND SPI TRANSFER ===================== */
+
 HAL_StatusTypeDef SX1280_PortWaitBusyLow(uint32_t timeout_ms)
 {
     /*
@@ -91,6 +99,6 @@ HAL_StatusTypeDef SX1280_PortWaitBusyLow(uint32_t timeout_ms)
 
 HAL_StatusTypeDef SX1280_PortSpiTxRx(const uint8_t *tx, uint8_t *rx, uint16_t len)
 {
-    /* The radio command layer owns CS and BUSY timing; this function only clocks bytes. */
+    /* Fixed HAL timeout bounds a failed SPI1 transaction; caller owns CS/BUSY. */
     return HAL_SPI_TransmitReceive(&hspi1, (uint8_t *)tx, rx, len, 100);
 }

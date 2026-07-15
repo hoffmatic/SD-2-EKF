@@ -1,21 +1,32 @@
-/*
- * PROJECT FILE OVERVIEW
- * Comment made: 2026-07-07 17:44:48 -04:00
+/**
+ * @file ambar_app.h
+ * @brief Public lifecycle API for the cooperative AMBAR application.
  *
- * What this file does:
- *   This is the simple public entry point for the flight application scheduler. main.c calls it after board startup, then calls the task function forever.
+ * OVERVIEW
+ * --------
+ *   Public lifecycle entry points for the [ARCH-1] cooperative application
+ *   scheduler and its interrupt forwarding hook.
  *
- * Process flow:
- *   Init stores device health, captures the pad reference, resets the estimator, and keeps the motor disabled. The task function then schedules IMU, barometer, radio, and actuator checks.
+ * HOW IT WORKS
+ * ------------
+ *   main.c initializes hardware, calls AmbarApp_Init() once, then calls
+ *   AmbarApp_Task() continuously. The task joins [ARCH-4] flight output to the
+ *   final [ARCH-5] actuator safety layer while servicing communications.
  *
- * Main variables and what can be changed:
- *   There are no tuning values in this header. Scheduler periods and barometer standard deviation live in ambar_app.c.
+ * OWNERSHIP
+ * ---------
+ *   This header intentionally exposes no tuning. Scheduler periods live in
+ *   ambar_app.c; feature locks, flight tuning, and actuator limits live in their
+ *   owning modules.
  *
- * Assumptions:
- *   main.c has already initialized clocks, GPIO, I2C, SPI, USB, and chip drivers before this layer starts.
+ * SAFETY BOUNDARY
+ * ---------------
+ *   main.c has initialized clocks, GPIO, I2C, SPI, USB, and chip drivers. The
+ *   task must run frequently because there is no RTOS or independent motor task.
  *
- * What is missing:
- *   There is no command parser, persistent configuration, or flight-data logging interface yet.
+ *   The application may request motion but cannot bypass ambar_actuator.c.
+ *   Disconnect, DISARM, simulation timeout, ESTOP, and fault paths remove motor
+ *   energy immediately.
  */
 
 #ifndef AMBAR_APP_H
@@ -29,18 +40,17 @@ extern "C" {
 
 #include <stdint.h>
 
-/*
- * ===================== AMBAR EKF PCB INTEGRATION - NEW FILE =====================
- *
- * Small application scheduler that replaces the old blocking one-second sensor
- * loop.  main.c initializes the board as before, then hands timing-sensitive
- * flight work to AmbarApp_Task().
- */
+/* -------------------- Application lifecycle ([ARCH-1]) -------------------- */
 
+/* Initialize singleton state after all board drivers have completed bring-up. */
 void AmbarApp_Init(HAL_StatusTypeDef sensor_status,
                    HAL_StatusTypeDef radio_status,
                    uint8_t motor_driver_ok);
+
+/* Run one bounded cooperative pass; main.c calls this continuously. */
 void AmbarApp_Task(void);
+
+/* Forward board EXTI pins to the owning subsystem; actuator DIAG faults latch here. */
 void AmbarApp_HandleExtiPin(uint16_t GPIO_Pin);
 
 #ifdef __cplusplus

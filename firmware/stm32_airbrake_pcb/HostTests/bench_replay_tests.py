@@ -1,21 +1,10 @@
-"""
-PROJECT FILE OVERVIEW
-Comment made: 2026-07-07 18:31:46 -04:00
+"""Quick mathematical smoke test for the two apogee predictor models.
 
-What this file does:
-  This is a small host-side replay check for the airbrake firmware math. It compares the old ballistic apogee estimate with the new drag-aware coast estimate.
-
-Process flow:
-  A simple simulated coast profile is generated, both apogee predictors are run, and the script prints pass/fail checks that can be repeated before changing firmware tuning.
-
-Main variables and what can be changed:
-  MASS_KG, DRAG_AREA_M2, AIR_DENSITY, START_ALT_M, and START_VEL_MPS are the main test knobs. Change them to match measured rocket values after bench work.
-
-Assumptions:
-  This script tests the predictor shape only. It does not compile or run the STM32 firmware, and it does not validate the real actuator.
-
-What is missing:
-  There is no canned real flight log replay yet and no automatic comparison against the original desktop C++ EKF.
+The script generates one synthetic upward coast, evaluates both the ballistic
+and drag-aware equations, and checks broad physical invariants.  Constants at
+the top are scenario inputs, not validated vehicle measurements.  This test is
+useful before changing [ARCH-4] prediction logic, but it does not compile the
+production C implementation, exercise USB, or prove physical actuator motion.
 """
 
 import math

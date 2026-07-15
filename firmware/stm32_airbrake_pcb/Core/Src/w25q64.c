@@ -1,21 +1,10 @@
-/*
- * PROJECT FILE OVERVIEW
- * Comment made: 2026-07-07 18:31:46 -04:00
+/**
+ * @file w25q64.c
+ * @brief SPI command implementation for bounded read/program/sector erase.
  *
- * What this file does:
- *   This file talks to the W25Q64JV flash chip over SPI3. It gives the rest of the firmware safe read, sector erase, and page program functions.
- *
- * Process flow:
- *   Every write first enables writes, sends either a page program or sector erase command, then waits until the busy bit clears. Reads stream bytes from an address without changing flash contents.
- *
- * Main variables and what can be changed:
- *   Command bytes match the W25Q64JV datasheet. Timeout values can be adjusted after bench testing, but page and sector sizes are fixed by the chip.
- *
- * Assumptions:
- *   The chip select pin idles high, SPI3 mode matches the flash device, and callers erase sectors before programming bytes from 1 to 0.
- *
- * What is missing:
- *   The driver does not implement quad-SPI, suspend/resume, unique ID reads, power-down modes, or a filesystem.
+ * Sections: command/timing constants -> chip-select/address helpers -> status
+ * and identity -> public reads/programs/erase.  Every mutating command performs
+ * WRITE_ENABLE and a bounded BUSY poll.  See CODE_GUIDE.md [ARCH-7].
  */
 
 #include "w25q64.h"
@@ -23,6 +12,10 @@
 #include <stddef.h>
 
 extern SPI_HandleTypeDef hspi3;
+
+/* -------------------------------------------------------------------------- */
+/* Device commands, status bits, and blocking timeouts                         */
+/* -------------------------------------------------------------------------- */
 
 #define W25Q64_CMD_WRITE_ENABLE  0x06U
 #define W25Q64_CMD_READ_STATUS1  0x05U
@@ -38,6 +31,7 @@ extern SPI_HandleTypeDef hspi3;
 
 static void w25q64_cs_low(void)
 {
+    /* FLASH_CS is active-low and dedicated to the SPI3 flash device. */
     HAL_GPIO_WritePin(FLASH_CS_GPIO_Port, FLASH_CS_Pin, GPIO_PIN_RESET);
 }
 
@@ -48,6 +42,7 @@ static void w25q64_cs_high(void)
 
 static void w25q64_address_bytes(uint32_t address, uint8_t out[3])
 {
+    /* W25Q64 uses a 24-bit big-endian command address. */
     out[0] = (uint8_t)((address >> 16) & 0xFFU);
     out[1] = (uint8_t)((address >> 8) & 0xFFU);
     out[2] = (uint8_t)(address & 0xFFU);
@@ -55,6 +50,7 @@ static void w25q64_address_bytes(uint32_t address, uint8_t out[3])
 
 static HAL_StatusTypeDef w25q64_write_enable(void)
 {
+    /* WEL is cleared by each program/erase operation and must be set again. */
     uint8_t cmd = W25Q64_CMD_WRITE_ENABLE;
     HAL_StatusTypeDef status;
 
@@ -88,6 +84,9 @@ static HAL_StatusTypeDef w25q64_read_status1(uint8_t *status1)
 
 HAL_StatusTypeDef W25Q64_WaitReady(uint32_t timeout_ms)
 {
+    /* Polling is intentionally bounded so a missing/busy flash cannot hang the
+     * cooperative application forever.
+     */
     uint32_t start = HAL_GetTick();
     uint8_t status1 = 0U;
 
@@ -175,6 +174,7 @@ HAL_StatusTypeDef W25Q64_Read(uint32_t address, uint8_t *data, uint32_t length)
     while (length > 0U)
     {
         uint8_t cmd[4];
+        /* HAL takes a uint16_t transfer length; keep margin below 65535. */
         uint32_t chunk = (length > 60000UL) ? 60000UL : length;
         HAL_StatusTypeDef status;
 
@@ -213,6 +213,7 @@ HAL_StatusTypeDef W25Q64_Program(uint32_t address, const uint8_t *data, uint32_t
     while (length > 0U)
     {
         uint8_t cmd[4];
+        /* A PAGE_PROGRAM wraps inside one page, so split before each boundary. */
         uint32_t page_space = W25Q64_PAGE_BYTES - (address % W25Q64_PAGE_BYTES);
         uint32_t chunk = (length < page_space) ? length : page_space;
         HAL_StatusTypeDef status;

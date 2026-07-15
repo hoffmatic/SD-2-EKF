@@ -1,33 +1,17 @@
-/*
- * PROJECT FILE OVERVIEW
- * Comment made: 2026-07-07 17:44:48 -04:00
+/**
+ * @file lsm6dsv32x.c
+ * @brief Polling I2C1 implementation for the primary IMU.
  *
- * What this file does:
- *   This file talks to the LSM6DSV32X IMU over I2C1. It configures the sensor and reads raw gyro and accelerometer data.
- *
- * Process flow:
- *   Startup confirms the IMU, checks WHO_AM_I, resets the chip, waits for reset to finish, sets data update behavior, then sets accel and gyro ranges and 120 Hz output rates.
- *
- * Main variables and what can be changed:
- *   CTRL1, CTRL2, CTRL6, and CTRL8 writes set rate and scale. Change them only if the desired IMU rate or sensor range changes.
- *
- * Assumptions:
- *   The EKF receives converted, pad-zeroed vertical acceleration from rocket_sensors.c, not directly from this driver.
- *
- * What is missing:
- *   No data-ready interrupt, FIFO, self-test, or gyro-based attitude estimate is implemented.
+ * Sections: common register access -> identity/status -> reset/configuration ->
+ * six-axis sample read -> non-disruptive health check.  No flight-frame or EKF
+ * calculations belong in this layer.  See CODE_GUIDE.md [ARCH-2].
  */
 
 #include "lsm6dsv32x.h"
 
-/*
- * LSM6DSV32X low-level I2C driver.
- *
- * The EKF only consumes vertical acceleration, but keeping all six raw channels
- * available makes the radio packet useful for board orientation checks and bench
- * debugging.  This file deliberately avoids EKF math; it only speaks sensor
- * registers and returns raw counts.
- */
+/* -------------------------------------------------------------------------- */
+/* Bus configuration and private register helpers                             */
+/* -------------------------------------------------------------------------- */
 
 #define LSM6DSV32X_I2C_TIMEOUT_MS    100U
 #define LSM6DSV32X_ADDR(dev)         ((uint16_t)((dev)->addr_7bit << 1))
@@ -99,7 +83,11 @@ HAL_StatusTypeDef LSM6DSV32X_ReadStatus(
     return lsm6_read_u8(dev, LSM6DSV32X_STATUS_REG, status);
 }
 
-static HAL_StatusTypeDef lsm6_read_bytes(LSM6DSV32X_HandleTypeDef *dev, uint8_t start_reg, uint8_t *buffer, uint16_t len)
+static HAL_StatusTypeDef lsm6_read_bytes(
+    LSM6DSV32X_HandleTypeDef *dev,
+    uint8_t start_reg,
+    uint8_t *buffer,
+    uint16_t len)
 {
     /*
      * Multi-byte reads rely on IF_INC being enabled in CTRL3 during init.  That
@@ -152,7 +140,7 @@ HAL_StatusTypeDef LSM6DSV32X_Init(LSM6DSV32X_HandleTypeDef *dev)
         return HAL_ERROR;
     }
 
-    // Software reset: CTRL3 bit0 = SW_RESET.
+    /* Software reset: CTRL3 bit0 = SW_RESET. */
     status = lsm6_write_u8(dev, LSM6DSV32X_CTRL3, 0x01U);
     if (status != HAL_OK)
     {
@@ -188,23 +176,23 @@ HAL_StatusTypeDef LSM6DSV32X_Init(LSM6DSV32X_HandleTypeDef *dev)
         return HAL_TIMEOUT;
     }
 
-    // CTRL3: BDU=1, IF_INC=1. Reserved bits remain 0.
+    /* CTRL3: BDU=1, IF_INC=1; reserved bits remain zero. */
     status = lsm6_write_u8(dev, LSM6DSV32X_CTRL3, 0x44U);
     if (status != HAL_OK) { return status; }
 
-    // CTRL8: bit2 must be 1. FS_XL[1:0] = 11 -> +/-32 g.
+    /* CTRL8: mandatory bit2 plus FS_XL=11 selects +/-32 g. */
     status = lsm6_write_u8(dev, LSM6DSV32X_CTRL8, 0x07U);
     if (status != HAL_OK) { return status; }
 
-    // CTRL6: FS_G[3:0] = 1100 -> +/-4000 dps. LPF bits left 0.
+    /* CTRL6: FS_G=1100 selects +/-4000 dps; LPF bits remain zero. */
     status = lsm6_write_u8(dev, LSM6DSV32X_CTRL6, 0x0CU);
     if (status != HAL_OK) { return status; }
 
-    // CTRL1: accel high-performance mode, ODR_XL = 120 Hz.
+    /* CTRL1: accelerometer high-performance mode at 120 Hz. */
     status = lsm6_write_u8(dev, LSM6DSV32X_CTRL1, 0x06U);
     if (status != HAL_OK) { return status; }
 
-    // CTRL2: gyro high-performance mode, ODR_G = 120 Hz.
+    /* CTRL2: gyroscope high-performance mode at 120 Hz. */
     status = lsm6_write_u8(dev, LSM6DSV32X_CTRL2, 0x06U);
     if (status != HAL_OK) { return status; }
 
@@ -212,7 +200,9 @@ HAL_StatusTypeDef LSM6DSV32X_Init(LSM6DSV32X_HandleTypeDef *dev)
     return HAL_OK;
 }
 
-HAL_StatusTypeDef LSM6DSV32X_ReadData(LSM6DSV32X_HandleTypeDef *dev, int16_t data[LSM6DSV32X_DATA_COUNT])
+HAL_StatusTypeDef LSM6DSV32X_ReadData(
+    LSM6DSV32X_HandleTypeDef *dev,
+    int16_t data[LSM6DSV32X_DATA_COUNT])
 {
     /*
      * Read order begins at OUTX_L_G, so the 12 bytes are:
@@ -243,10 +233,7 @@ HAL_StatusTypeDef LSM6DSV32X_ReadData(LSM6DSV32X_HandleTypeDef *dev, int16_t dat
 
 HAL_StatusTypeDef LSM6DSV32X_RunBasicSelfTest(LSM6DSV32X_HandleTypeDef *dev)
 {
-    /*
-     * BEGIN AMBAR BENCH-GATED EXPANSION - BASIC IMU HEALTH CHECK
-     *
-     * This is not the factory electro-mechanical self-test sequence.  It is a
+    /* This is not the factory electro-mechanical self-test sequence. It is a
      * non-disruptive bench health check that confirms WHO_AM_I still matches,
      * STATUS is readable, and at least one accelerometer axis is producing a
      * nonzero count.  It avoids changing sensor modes during EKF bring-up.
@@ -279,5 +266,4 @@ HAL_StatusTypeDef LSM6DSV32X_RunBasicSelfTest(LSM6DSV32X_HandleTypeDef *dev)
 
     (void)status;
     return HAL_OK;
-    /* END AMBAR BENCH-GATED EXPANSION - BASIC IMU HEALTH CHECK */
 }

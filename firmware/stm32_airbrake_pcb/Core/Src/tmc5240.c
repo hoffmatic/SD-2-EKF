@@ -1,60 +1,51 @@
-/*
- * PROJECT FILE OVERVIEW
- * Comment made: 2026-07-07 17:44:48 -04:00
+/**
+ * @file tmc5240.c
+ * @brief TMC5240 SPI transport, board bring-up, and ramp-register operations.
  *
- * What this file does:
- *   This file talks to the TMC5240 motor driver over SPI2 and controls basic enable and sleep pins. It is only a bring-up and low-level access layer.
+ * IMPLEMENTATION MAP
+ * ------------------
+ *  1. Convert requested current labels into bounded register fields.
+ *  2. Transfer five-byte SPI datagrams and handle pipelined register reads.
+ *  3. Keep outputs disabled while checking identity and loading a profile.
+ *  4. Expose position/status helpers to the actuator safety state machine.
  *
- * Process flow:
- *   Startup keeps outputs disabled, wakes the chip, reads the IOIN version field, and reports whether the expected driver answered. Register reads use the TMC5240 pipelined SPI read sequence.
- *
- * Main variables and what can be changed:
- *   TMC5240_EXPECTED_VERSION is the main check. SPI timeout values can be tuned if needed, but motion-related values are intentionally absent for now.
- *
- * Assumptions:
- *   SPI2 is wired correctly and DRV_ENN is active-low, so setting the pin disables motor outputs.
- *
- * What is missing:
- *   No current-limit configuration, stepper motion commands, homing, stall detection, or emergency retract behavior is implemented.
- */
-
-/*
- * tmc5240.c
- *
- *  Created on: Jul 1, 2026
- *      Author: hoffman
+ * The permission to move is deliberately outside this file.  See
+ * CODE_GUIDE.md [ARCH-5] and ambar_actuator.c for homing, travel clamps,
+ * phase gates, progress monitoring, and fault behavior.
  */
 #include "tmc5240.h"
-
-/*
- * TMC5240 low-level SPI2 driver.
- *
- * This file proves that the driver chip is awake and reachable, and it exposes
- * the DRV_ENN/SLEEPN pins.  Position control, homing, current limits, and motion
- * profiles are intentionally not implemented here yet so this EKF build cannot
- * accidentally move the mechanism during sensor bench testing.
- */
+#include "ambar_features.h"
 
 extern SPI_HandleTypeDef hspi2;
+
+/* -------------------------------------------------------------------------- */
+/* Current-field conversion (temporary, calibration still required)            */
+/* -------------------------------------------------------------------------- */
 
 static uint8_t tmc5240_current_ma_to_cs(uint16_t current_ma)
 {
     /*
-     * BEGIN AMBAR BENCH-GATED EXPANSION - CURRENT PLACEHOLDER
-     *
      * The real current scale depends on sense-resistor and driver configuration
      * details that must be measured on the PCB.  This conservative placeholder
      * maps roughly 0..3100 mA into the TMC 0..31 current field so bench firmware
      * has a bounded register value before final calibration.
      */
     uint32_t cs = ((uint32_t)current_ma + 50U) / 100U;
+    /* The presentation profile's 3000 placeholder maps to the prototype IRUN=31. */
+    if (current_ma >= 3000U)
+    {
+        cs = 31U;
+    }
     if (cs > 31U)
     {
         cs = 31U;
     }
     return (uint8_t)cs;
-    /* END AMBAR BENCH-GATED EXPANSION - CURRENT PLACEHOLDER */
 }
+
+/* -------------------------------------------------------------------------- */
+/* SPI framing and raw register access                                         */
+/* -------------------------------------------------------------------------- */
 
 static void TMC5240_CsLow(void)
 {
@@ -133,6 +124,10 @@ HAL_StatusTypeDef TMC5240_ReadVersion(uint8_t *version)
     return status;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Direct enable/sleep controls and identity checks                            */
+/* -------------------------------------------------------------------------- */
+
 void TMC5240_SetDriverEnabled(uint8_t enabled)
 {
     /* DRV_ENN is active-low: reset enables outputs, set disables outputs. */
@@ -151,12 +146,30 @@ void TMC5240_SetAwake(uint8_t awake)
 
 HAL_StatusTypeDef TMC5240_BringupTest(uint8_t *version)
 {
+    uint8_t first_version = 0U;
+    uint8_t second_version = 0U;
+    HAL_StatusTypeDef status;
+
     /* First power-up test: keep motor outputs disabled, wake chip, read ID. */
     TMC5240_SetDriverEnabled(0);
     TMC5240_SetAwake(1);
     HAL_Delay(10);
 
-    return TMC5240_ReadVersion(version);
+    status = TMC5240_ReadVersion(&first_version);
+    if (status != HAL_OK)
+    {
+        return status;
+    }
+    status = TMC5240_ReadVersion(&second_version);
+    if (status != HAL_OK || first_version != second_version)
+    {
+        return HAL_ERROR;
+    }
+    if (version != NULL)
+    {
+        *version = second_version;
+    }
+    return HAL_OK;
 }
 
 HAL_StatusTypeDef TMC5240_Init(uint8_t *version)
@@ -175,8 +188,16 @@ HAL_StatusTypeDef TMC5240_Init(uint8_t *version)
         return status;
     }
 
-    /* Treat a wrong chip ID the same as a failed bring-up. */
-    if (detected_version != TMC5240_EXPECTED_VERSION)
+    /*
+     * The datasheet defines 0x40. The assembled presentation PCB consistently
+     * reports 0x41 and its earlier prototype exercised the same register subset.
+     * Keep that board-specific allowance out of normal motion-inhibited builds.
+     */
+    if (detected_version != TMC5240_EXPECTED_VERSION
+#if AMBAR_FEATURE_PRESENTATION_MOTION
+        && detected_version != TMC5240_PRESENTATION_BOARD_VERSION
+#endif
+        )
     {
         return HAL_ERROR;
     }
@@ -184,11 +205,13 @@ HAL_StatusTypeDef TMC5240_Init(uint8_t *version)
     return HAL_OK;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Electrical and ramp-generator profile                                       */
+/* -------------------------------------------------------------------------- */
+
 HAL_StatusTypeDef TMC5240_ConfigureSafeDefaults(void)
 {
     /*
-     * BEGIN AMBAR BENCH-GATED EXPANSION - SAFE DRIVER DEFAULTS
-     *
      * Keep outputs disabled while writing conservative position-mode defaults.
      * The actuator state machine decides later whether DRV_ENN may be released.
      */
@@ -197,17 +220,49 @@ HAL_StatusTypeDef TMC5240_ConfigureSafeDefaults(void)
     TMC5240_SetDriverEnabled(0U);
     TMC5240_SetAwake(1U);
 
-    status = TMC5240_WriteRegister(TMC5240_REG_GSTAT, 0x00000007U);
+    status = TMC5240_WriteRegister(TMC5240_REG_GSTAT, 0x0000001FU);
+    if (status != HAL_OK) { return status; }
+
+    /* Match the known-moving prototype's SpreadCycle electrical setup. */
+    status = TMC5240_WriteRegister(TMC5240_REG_GCONF, 0x00000000U);
+    if (status != HAL_OK) { return status; }
+
+    status = TMC5240_WriteRegister(TMC5240_REG_DRV_CONF, 0x00000000U);
+    if (status != HAL_OK) { return status; }
+
+    status = TMC5240_WriteRegister(TMC5240_REG_TPOWERDOWN, 10U);
+    if (status != HAL_OK) { return status; }
+
+    /* TOFF=5 enables the chopper; INTPOL=1 and TBL=2 match the prototype. */
+    status = TMC5240_WriteRegister(TMC5240_REG_CHOPCONF, 0x10010005U);
     if (status != HAL_OK) { return status; }
 
     status = TMC5240_WriteRegister(TMC5240_REG_RAMPMODE, TMC5240_RAMPMODE_POSITION);
     if (status != HAL_OK) { return status; }
 
+#if AMBAR_FEATURE_PRESENTATION_MOTION
+    /*
+     * Register-equivalent settings from the earlier motor prototype that moved
+     * successfully: IHOLD=16, IRUN=31, GLOBALSCALER=0 (the chip's full-scale
+     * special value).  The *_ma API remains an explicitly uncalibrated mapping;
+     * these numbers must not be interpreted as measured motor current.
+     */
+    status = TMC5240_SetCurrentLimits(1600U, 3000U);
+    if (status != HAL_OK) { return status; }
+
+    status = TMC5240_SetGlobalScaler(0U);
+    if (status != HAL_OK) { return status; }
+
+    return TMC5240_SetMotionLimits(200000U, 20000U);
+#else
     status = TMC5240_SetCurrentLimits(100U, 200U);
     if (status != HAL_OK) { return status; }
 
+    status = TMC5240_SetGlobalScaler(32U);
+    if (status != HAL_OK) { return status; }
+
     return TMC5240_SetMotionLimits(1000U, 1000U);
-    /* END AMBAR BENCH-GATED EXPANSION - SAFE DRIVER DEFAULTS */
+#endif
 }
 
 HAL_StatusTypeDef TMC5240_SetCurrentLimits(uint16_t hold_current_ma,
@@ -216,9 +271,21 @@ HAL_StatusTypeDef TMC5240_SetCurrentLimits(uint16_t hold_current_ma,
     const uint8_t ihold = tmc5240_current_ma_to_cs(hold_current_ma);
     const uint8_t irun = tmc5240_current_ma_to_cs(run_current_ma);
     const uint32_t ihold_irun =
-        ((uint32_t)8U << 16) | ((uint32_t)irun << 8) | (uint32_t)ihold;
+        ((uint32_t)1U << 24) | ((uint32_t)4U << 16)
+        | ((uint32_t)irun << 8) | (uint32_t)ihold;
 
     return TMC5240_WriteRegister(TMC5240_REG_IHOLD_IRUN, ihold_irun);
+}
+
+HAL_StatusTypeDef TMC5240_SetGlobalScaler(uint8_t scaler)
+{
+    /* Hardware accepts 0 as full scale, or values in the range 32..255. */
+    if (scaler != 0U && scaler < 32U)
+    {
+        return HAL_ERROR;
+    }
+
+    return TMC5240_WriteRegister(TMC5240_REG_GLOBALSCALER, (uint32_t)scaler);
 }
 
 HAL_StatusTypeDef TMC5240_SetMotionLimits(uint32_t max_velocity_steps_per_s,
@@ -263,6 +330,10 @@ HAL_StatusTypeDef TMC5240_SetMotionLimits(uint32_t max_velocity_steps_per_s,
     return TMC5240_WriteRegister(TMC5240_REG_TZEROWAIT, 10U);
 }
 
+/* -------------------------------------------------------------------------- */
+/* Position commands and runtime diagnostics                                   */
+/* -------------------------------------------------------------------------- */
+
 HAL_StatusTypeDef TMC5240_SetActualPosition(int32_t position_steps)
 {
     return TMC5240_WriteRegister(TMC5240_REG_XACTUAL, (uint32_t)position_steps);
@@ -302,21 +373,28 @@ HAL_StatusTypeDef TMC5240_ReadDriverStatus(uint32_t *driver_status)
     return TMC5240_ReadRegister(TMC5240_REG_DRV_STATUS, driver_status);
 }
 
+uint8_t TMC5240_DriverStatusHasHardFault(uint32_t driver_status)
+{
+    return (driver_status & TMC5240_DRV_STATUS_HARD_FAULT_MASK) != 0U ? 1U : 0U;
+}
+
 HAL_StatusTypeDef TMC5240_Stop(void)
 {
     /*
-     * Stop command used by retract/fault paths.  Setting target to the current
-     * position avoids commanding a new move while the driver is being disabled.
+     * Assert active-low DRV_ENN before any SPI transaction so a sick bus cannot
+     * delay removal of motor energy.  Setting target to the current ramp-generator
+     * position then prevents a new move if the driver is enabled again later.
      */
     int32_t actual = 0;
-    HAL_StatusTypeDef status = TMC5240_ReadActualPosition(&actual);
+    HAL_StatusTypeDef status;
+
+    TMC5240_SetDriverEnabled(0U);
+    status = TMC5240_ReadActualPosition(&actual);
 
     if (status == HAL_OK)
     {
         status = TMC5240_SetTargetPosition(actual);
     }
-
-    TMC5240_SetDriverEnabled(0U);
     return status;
 }
 

@@ -1,0 +1,39 @@
+{
+  "schema": "ambar.openrocket_replay.v1",
+  "source": {
+    "path": "SimulationData/Source/26-07-10_Openrocket_Run.csv",
+    "sha256": "4D6B3D13FAD5FDE5EE002AC9AB4B27CDF626B6C315C52875DD5518B53E0B73D4",
+    "numeric_rows": 618,
+    "headers": [
+      "Time (s)",
+      "Altitude (m)",
+      "Total velocity (m/s)",
+      "Total acceleration (m/s\u00b2)"
+    ]
+  },
+  "replay": {
+    "rate_hz": 50.0,
+    "prepad_s": 1.0,
+    "source_stop_s": 15.918,
+    "sample_count": 847,
+    "vertical_source": "DERIVED: altitude-fit vertical velocity plus signed Total acceleration magnitude",
+    "vertical_channels_derived": true,
+    "source_max_gap_s": 0.5,
+    "target_apogee_m": 914.4,
+    "barometer_stddev_m": 1.5,
+    "acceleration_convention": "launch-frame vertical, positive up, pad-zeroed/gravity removed"
+  },
+  "mechanical_display_assumptions": {
+    "verified": false,
+    "brake_count": 4,
+    "force_per_brake_n": 55.0,
+    "combined_force_n": 220.0,
+    "full_extension_motor_rotations": 3.0,
+    "motor_full_steps_per_revolution": 200,
+    "microsteps": 256,
+    "gear_ratio": 1.0,
+    "prototype_equivalent_full_counts": 153600,
+    "rotations_formula": "3 * deployment_percent / 100",
+    "counts_formula": "round(153600 * deployment_percent / 100)"
+  }
+}

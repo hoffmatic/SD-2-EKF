@@ -1,21 +1,15 @@
-/*
- * PROJECT FILE OVERVIEW
- * Comment made: 2026-07-07 18:31:46 -04:00
+/**
+ * @file w25q64.h
+ * @brief Blocking SPI3 driver for the 8 MiB external configuration/log flash.
  *
- * What this file does:
- *   This header describes the W25Q64 external flash driver. The flash chip stores bench configuration and flight or bench log records.
+ * The driver verifies the JEDEC identity, exposes bounded reads, splits programs
+ * at 256-byte page boundaries, aligns erases to 4 KiB sectors, and waits for the
+ * BUSY bit after every write operation.  ambar_config.c and ambar_log.c own the
+ * on-flash formats; this layer only performs address-based storage operations.
  *
- * Process flow:
- *   The app initializes the chip, reads the JEDEC ID, erases 4 KB sectors before rewriting them, writes data in 256-byte pages, and reads records back by address.
- *
- * Main variables and what can be changed:
- *   W25Q64_TOTAL_BYTES, W25Q64_SECTOR_BYTES, and W25Q64_PAGE_BYTES describe the installed W25Q64JVSSIQ. Do not change them unless the flash part changes.
- *
- * Assumptions:
- *   The flash is wired to SPI3 with FLASH_CS as the active-low chip select. The driver uses blocking HAL transfers because logging happens at low rate.
- *
- * What is missing:
- *   No wear leveling beyond the simple log ring, DMA transfers, filesystem, or bad-sector tracking is implemented.
+ * Calls are synchronous and sector erase can take seconds.  The application
+ * must keep them out of critical USB/sensor/motion intervals.  See
+ * CODE_GUIDE.md [ARCH-1], [ARCH-7].
  */
 
 #ifndef W25Q64_H
@@ -29,26 +23,37 @@ extern "C" {
 
 #include <stdint.h>
 
+/* Geometry of the fitted W25Q64JV-class device. */
 #define W25Q64_TOTAL_BYTES   (8UL * 1024UL * 1024UL)
 #define W25Q64_SECTOR_BYTES  4096UL
 #define W25Q64_PAGE_BYTES    256UL
 
+/* Three-byte JEDEC identity expected from the assembled PCB. */
 #define W25Q64_EXPECTED_MANUFACTURER_ID 0xEFU
 #define W25Q64_EXPECTED_MEMORY_TYPE     0x40U
 #define W25Q64_EXPECTED_CAPACITY        0x17U
 
 typedef struct
 {
+    /** Winbond manufacturer byte. */
     uint8_t manufacturer_id;
+    /** Device-family/type byte. */
     uint8_t memory_type;
+    /** Density byte (0x17 represents 64 Mbit). */
     uint8_t capacity;
 } W25Q64_JedecId_t;
 
+/** @brief Release chip select, verify JEDEC identity, and wait until ready. */
 HAL_StatusTypeDef W25Q64_Init(W25Q64_JedecId_t *jedec_id);
+/** @brief Read the raw three-byte JEDEC identity. */
 HAL_StatusTypeDef W25Q64_ReadJedecId(W25Q64_JedecId_t *jedec_id);
+/** @brief Read a bounded byte range without modifying flash. */
 HAL_StatusTypeDef W25Q64_Read(uint32_t address, uint8_t *data, uint32_t length);
+/** @brief Page-split a bounded program operation; caller must erase as needed. */
 HAL_StatusTypeDef W25Q64_Program(uint32_t address, const uint8_t *data, uint32_t length);
+/** @brief Erase the 4 KiB sector containing @p address. */
 HAL_StatusTypeDef W25Q64_EraseSector(uint32_t address);
+/** @brief Poll status register 1 until BUSY clears or timeout expires. */
 HAL_StatusTypeDef W25Q64_WaitReady(uint32_t timeout_ms);
 
 #ifdef __cplusplus

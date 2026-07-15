@@ -64,6 +64,7 @@
 /* External variables --------------------------------------------------------*/
 
 /* USER CODE BEGIN EV */
+extern PCD_HandleTypeDef hpcd_USB_DRD_FS;
 
 /* USER CODE END EV */
 
@@ -192,7 +193,7 @@ void SysTick_Handler(void)
   /* USER CODE BEGIN SysTick_IRQn 0 */
   /*
    * HAL_GetTick() drives the nonblocking scheduler periods:
-   * IMU around 125 Hz, barometer 50 Hz, telemetry 5 Hz.  Keep SysTick enabled
+     * IMU around 125 Hz, barometer 50 Hz, telemetry 1 Hz.  Keep SysTick enabled
    * and lightweight so estimator timing remains stable.
    */
 
@@ -212,16 +213,15 @@ void SysTick_Handler(void)
 
 /* USER CODE BEGIN 1 */
 
+void USB_DRD_FS_IRQHandler(void)
+{
+  HAL_PCD_IRQHandler(&hpcd_USB_DRD_FS);
+}
+
 void EXTI4_IRQHandler(void)
 {
   /* LORA_DIO1: radio packet/event ready. */
   HAL_GPIO_EXTI_IRQHandler(LORA_DIO1_Pin);
-}
-
-void EXTI5_IRQHandler(void)
-{
-  /* LORA_BUSY is also routed as EXTI by CubeMX; callback ignores it for now. */
-  HAL_GPIO_EXTI_IRQHandler(LORA_BUSY_Pin);
 }
 
 void EXTI6_IRQHandler(void)

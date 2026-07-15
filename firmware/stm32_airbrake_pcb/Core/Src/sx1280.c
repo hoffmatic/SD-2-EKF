@@ -1,34 +1,46 @@
 /*
- * PROJECT FILE OVERVIEW
- * Comment made: 2026-07-07 17:44:48 -04:00
+ * AMBAR SX1280 LORA MODEM DRIVER - IMPLEMENTATION
  *
- * What this file does:
- *   This file controls the SX1280 radio modem. It configures LoRa settings, writes telemetry bytes into the FIFO, reads received packets, and keeps the radio in a known state.
+ * Purpose
+ *   Configures the flight-side SX1280 LoRa modem and moves opaque packet bytes
+ *   between radio_bridge and the radio FIFO.  It owns command framing, modem
+ *   parameters, IRQ polling/clearing, continuous-RX restoration, and the
+ *   cooperative transmit state.  Packet schemas and command meaning stay in
+ *   radio_bridge; SPI/GPIO wiring stays in sx1280_port.
  *
- * Process flow:
- *   Startup resets the radio, waits for BUSY, sets LoRa mode and frequency, configures modulation and packet format, sets IRQ routing, and starts receive. Transmit briefly leaves receive then returns.
+ * Data/control flow
+ *   InitLoRa resets the radio, selects LoRa packet mode, applies the matched
+ *   air/ground profile, routes IRQs to DIO1, and enters continuous receive.
+ *   StartTransmit stages one packet and starts TX; ServiceTransmit polls IRQs
+ *   across later main-loop passes and restores RX on completion.  RX polling
+ *   validates radio IRQ/length state before copying FIFO bytes to the bridge.
+ *   This is the modem portion of CODE_GUIDE.md [ARCH-6].
  *
- * Main variables and what can be changed:
- *   Frequency, spreading factor, bandwidth, coding rate, sync word, and TX power are the main settings. Change them only with the ground receiver updated to match.
+ * Section map
+ *   1. Datasheet opcodes, registers, and IRQ masks
+ *   2. Ground-station-matched LoRa profile and TX runtime state
+ *   3. SPI command/register/FIFO helpers
+ *   4. Modem configuration helpers
+ *   5. IRQ and receive-status helpers
+ *   6. Continuous RX and full initialization
+ *   7. Cooperative/blocking TX and failure recovery
+ *   8. Nonblocking receive poll
  *
- * Assumptions:
- *   SPI1 and radio control pins work, DIO1 is the active interrupt line, and the ground receiver expects this LoRa configuration.
- *
- * What is missing:
- *   No adaptive data rate, retry/ack system, command security, or detailed radio diagnostics beyond status and timeout handling is implemented.
+ * Safety and assumptions
+ *   Frequency, SF, bandwidth, coding rate, sync word, header mode, preamble, IQ,
+ *   and CRC must remain synchronized with the LILYGO sketch.  Every transaction
+ *   uses bounded BUSY/SPI waits, and TX failure performs full reinitialization so
+ *   the modem cannot silently remain out of RX.  The blocking TX wrapper can
+ *   delay the cooperative scheduler.  Receive callers must provide storage for
+ *   SX1280_MAX_PAYLOAD_LEN bytes.  This driver provides neither authentication,
+ *   retransmission/ACK policy, adaptive data rate, nor link encryption.
  */
 
 #include "sx1280.h"
 #include "sx1280_port.h"
 #include <string.h>
 
-/*
- * SX1280 LoRa radio driver.
- *
- * The flight app uses radio_bridge.c to package telemetry.  This file is the
- * modem-facing half: it configures LoRa settings, manages the SX1280 FIFO, polls
- * IRQ status, and returns the radio to continuous receive after each transmit.
- */
+/* ===================== DATASHEET COMMAND, REGISTER, AND IRQ MAP ===================== */
 
 /* SX1280 command opcodes */
 #define SX1280_CMD_GET_STATUS            0xC0
@@ -65,7 +77,9 @@
 
 #define SX1280_IRQ_ALL                   0xFFFF
 
-/* Test RF settings */
+/* ===================== MATCHED AIR/GROUND LORA PROFILE ===================== */
+
+/* Flight and LILYGO ground station both operate at 2445 MHz. */
 #define SX1280_RF_FREQUENCY_HZ           2445000000UL
 
 /* LoRa settings matching the LILYGO sketch */
@@ -76,10 +90,20 @@
 #define SX1280_LORA_HEADER_EXPLICIT      0x00
 #define SX1280_LORA_CRC_ON               0x20
 #define SX1280_LORA_IQ_NORMAL            0x40
+#define SX1280_LORA_PREAMBLE_12_SYMBOLS  0x16
 #define SX1280_LORA_SYNC_WORD_PRIVATE    0x12
 #define SX1280_LORA_SYNC_WORD_CONTROL    0x44
 
 #define SX1280_STDBY_RC                  0x00
+
+/* ===================== COOPERATIVE TRANSMIT STATE ===================== */
+
+/* A single in-flight packet owns the modem until ServiceTransmit resolves it. */
+static bool sx1280_tx_active = false;
+static uint32_t sx1280_tx_started_ms = 0U;
+static uint32_t sx1280_tx_timeout_ms = 0U;
+
+/* ===================== SPI COMMAND, REGISTER, AND FIFO HELPERS ===================== */
 
 static HAL_StatusTypeDef sx1280_transfer(const uint8_t *tx, uint8_t *rx, uint16_t len)
 {
@@ -133,6 +157,7 @@ static HAL_StatusTypeDef sx1280_command(uint8_t opcode, const uint8_t *args, uin
 
 static HAL_StatusTypeDef sx1280_write_register(uint16_t address, uint8_t value)
 {
+    /* Register addresses are sent big-endian as required by the SX1280 command. */
     uint8_t tx[4];
     uint8_t rx[4] = {0};
 
@@ -193,6 +218,8 @@ static HAL_StatusTypeDef sx1280_read_buffer(uint8_t offset, uint8_t *data, uint8
     memcpy(data, &rx[3], len);
     return HAL_OK;
 }
+
+/* ===================== MODEM CONFIGURATION HELPERS ===================== */
 
 static HAL_StatusTypeDef sx1280_set_standby(void)
 {
@@ -269,7 +296,8 @@ static HAL_StatusTypeDef sx1280_set_lora_sync_word(uint8_t sync_word)
 static HAL_StatusTypeDef sx1280_set_packet_params(uint8_t payload_len)
 {
     uint8_t args[7] = {
-        0x0C,                         /* preamble length = 12 symbols */
+        /* SX1280 packs preamble as exponent/mantissa: 6 * 2^1 = 12. */
+        SX1280_LORA_PREAMBLE_12_SYMBOLS,
         SX1280_LORA_HEADER_EXPLICIT,  /* explicit header */
         payload_len,                  /* payload length */
         SX1280_LORA_CRC_ON,           /* CRC enabled */
@@ -329,6 +357,8 @@ static HAL_StatusTypeDef sx1280_set_dio_irq_params(void)
     return sx1280_command(SX1280_CMD_SET_DIO_IRQ_PARAMS, args, sizeof(args));
 }
 
+/* ===================== IRQ AND RECEIVE-STATUS HELPERS ===================== */
+
 static HAL_StatusTypeDef sx1280_clear_irq(uint16_t irq_mask)
 {
     uint8_t args[2];
@@ -367,6 +397,7 @@ static HAL_StatusTypeDef sx1280_get_irq_status(uint16_t *irq_status)
 
 static HAL_StatusTypeDef sx1280_get_rx_buffer_status(uint8_t *payload_len, uint8_t *rx_start_pointer)
 {
+    /* Return the radio-reported packet length and FIFO start address as a pair. */
     uint8_t tx[4] = {
         SX1280_CMD_GET_RX_BUFFER_STATUS,
         0x00,
@@ -388,6 +419,8 @@ static HAL_StatusTypeDef sx1280_get_rx_buffer_status(uint8_t *payload_len, uint8
 
     return HAL_OK;
 }
+
+/* ===================== CONTINUOUS RECEIVE AND INITIALIZATION ===================== */
 
 HAL_StatusTypeDef SX1280_StartRxContinuous(void)
 {
@@ -427,6 +460,11 @@ HAL_StatusTypeDef SX1280_InitLoRa(void)
      * main.c/ambar_app.c so telemetry can show the radio fault instead of hiding it.
      */
     HAL_StatusTypeDef status;
+
+    /* A full reset always cancels any in-progress software TX state. */
+    sx1280_tx_active = false;
+    sx1280_tx_started_ms = 0U;
+    sx1280_tx_timeout_ms = 0U;
 
     status = SX1280_PortInit();
     if (status != HAL_OK) return status;
@@ -477,33 +515,57 @@ HAL_StatusTypeDef SX1280_InitLoRa(void)
     return SX1280_StartRxContinuous();
 }
 
-HAL_StatusTypeDef SX1280_Transmit(const uint8_t *data, uint8_t len, uint32_t timeout_ms)
+/* ===================== TRANSMIT STATE MACHINE AND FAILURE RECOVERY ===================== */
+
+static HAL_StatusTypeDef sx1280_recover_after_tx_failure(HAL_StatusTypeDef failure)
 {
     /*
-     * Blocking transmit is acceptable at 5 Hz telemetry because packets are short
-     * and the timeout path resets the radio.  The flight EKF itself is not inside
-     * this function, so estimator state remains protected if radio TX fails.
+     * TX setup and completion both leave continuous RX temporarily.  Always
+     * perform a full known-good reinitialization before reporting a failed TX;
+     * otherwise the bridge can look idle while the modem remains in standby.
      */
-    HAL_StatusTypeDef status;
-    uint16_t irq_status;
-    uint32_t start;
+    sx1280_tx_active = false;
+    sx1280_tx_started_ms = 0U;
+    sx1280_tx_timeout_ms = 0U;
 
-    if ((data == 0) || (len == 0) || (len > SX1280_MAX_PAYLOAD_LEN))
+    return SX1280_InitLoRa() == HAL_OK ? failure : HAL_ERROR;
+}
+
+bool SX1280_IsTransmitBusy(void)
+{
+    /* Read-only ownership query used by radio_bridge scheduling. */
+    return sx1280_tx_active;
+}
+
+HAL_StatusTypeDef SX1280_StartTransmit(const uint8_t *data,
+                                       uint8_t len,
+                                       uint32_t timeout_ms)
+{
+    /* Validate/stage the complete packet before publishing the active TX state. */
+    HAL_StatusTypeDef status;
+
+    if ((data == 0) || (len == 0) || (len > SX1280_MAX_PAYLOAD_LEN) ||
+        (timeout_ms == 0U))
     {
         return HAL_ERROR;
     }
 
+    if (sx1280_tx_active)
+    {
+        return HAL_BUSY;
+    }
+
     status = sx1280_set_standby();
-    if (status != HAL_OK) return status;
+    if (status != HAL_OK) return sx1280_recover_after_tx_failure(status);
 
     status = sx1280_set_packet_params(len);
-    if (status != HAL_OK) return status;
+    if (status != HAL_OK) return sx1280_recover_after_tx_failure(status);
 
     status = sx1280_clear_irq(SX1280_IRQ_ALL);
-    if (status != HAL_OK) return status;
+    if (status != HAL_OK) return sx1280_recover_after_tx_failure(status);
 
     status = sx1280_write_buffer(0x00, data, len);
-    if (status != HAL_OK) return status;
+    if (status != HAL_OK) return sx1280_recover_after_tx_failure(status);
 
     /*
      * SetTx with no timeout:
@@ -516,38 +578,84 @@ HAL_StatusTypeDef SX1280_Transmit(const uint8_t *data, uint8_t len, uint32_t tim
     };
 
     status = sx1280_command(SX1280_CMD_SET_TX, tx_args, sizeof(tx_args));
-    if (status != HAL_OK) return status;
+    if (status != HAL_OK) return sx1280_recover_after_tx_failure(status);
 
-    start = HAL_GetTick();
+    sx1280_tx_started_ms = HAL_GetTick();
+    sx1280_tx_timeout_ms = timeout_ms;
+    sx1280_tx_active = true;
+
+    return HAL_OK;
+}
+
+HAL_StatusTypeDef SX1280_ServiceTransmit(void)
+{
+    /* Resolve TX_DONE, recover on radio/software timeout, or yield HAL_BUSY. */
+    HAL_StatusTypeDef status;
+    uint16_t irq_status = 0U;
+
+    if (!sx1280_tx_active)
+    {
+        return HAL_OK;
+    }
+
+    status = sx1280_get_irq_status(&irq_status);
+
+    if ((status == HAL_OK) && ((irq_status & SX1280_IRQ_TX_DONE) != 0U))
+    {
+        status = sx1280_clear_irq(irq_status);
+        if (status != HAL_OK)
+        {
+            return sx1280_recover_after_tx_failure(status);
+        }
+
+        status = SX1280_StartRxContinuous();
+        if (status != HAL_OK)
+        {
+            return sx1280_recover_after_tx_failure(status);
+        }
+
+        sx1280_tx_active = false;
+        sx1280_tx_started_ms = 0U;
+        sx1280_tx_timeout_ms = 0U;
+        return HAL_OK;
+    }
+
+    if (((status == HAL_OK) &&
+         ((irq_status & SX1280_IRQ_RX_TX_TIMEOUT) != 0U)) ||
+        ((uint32_t)(HAL_GetTick() - sx1280_tx_started_ms) >= sx1280_tx_timeout_ms))
+    {
+        /* Reinitialize into continuous RX so one failed packet cannot wedge radio. */
+        (void)sx1280_clear_irq(SX1280_IRQ_ALL);
+        return sx1280_recover_after_tx_failure(HAL_TIMEOUT);
+    }
+
+    /* A transient SPI status read failure is retried until the TX timeout. */
+    return HAL_BUSY;
+}
+
+HAL_StatusTypeDef SX1280_Transmit(const uint8_t *data, uint8_t len, uint32_t timeout_ms)
+{
+    /*
+     * Retain a blocking wrapper for short boot and command-response packets.
+     * Periodic full telemetry uses Start/Service so sensor scheduling continues.
+     */
+    HAL_StatusTypeDef status = SX1280_StartTransmit(data, len, timeout_ms);
+
+    if (status != HAL_OK)
+    {
+        return status;
+    }
 
     do
     {
-        status = sx1280_get_irq_status(&irq_status);
-        if (status != HAL_OK)
-        {
-            continue;
-        }
-
-        if ((irq_status & SX1280_IRQ_TX_DONE) != 0)
-        {
-            sx1280_clear_irq(SX1280_IRQ_TX_DONE);
-            return SX1280_StartRxContinuous();
-        }
-
-        if ((irq_status & SX1280_IRQ_RX_TX_TIMEOUT) != 0)
-        {
-            sx1280_clear_irq(SX1280_IRQ_RX_TX_TIMEOUT);
-            SX1280_PortReset();
-            SX1280_InitLoRa();
-            return HAL_TIMEOUT;
-        }
+        status = SX1280_ServiceTransmit();
     }
-    while ((HAL_GetTick() - start) < timeout_ms);
+    while (status == HAL_BUSY);
 
-    SX1280_PortReset();
-    SX1280_InitLoRa();
-    return HAL_TIMEOUT;
+    return status;
 }
+
+/* ===================== NONBLOCKING RECEIVE POLL ===================== */
 
 HAL_StatusTypeDef SX1280_ReadPacketIfAvailable(uint8_t *data, uint8_t *len)
 {
@@ -565,6 +673,11 @@ HAL_StatusTypeDef SX1280_ReadPacketIfAvailable(uint8_t *data, uint8_t *len)
     if ((data == 0) || (len == 0))
     {
         return HAL_ERROR;
+    }
+
+    if (sx1280_tx_active)
+    {
+        return HAL_BUSY;
     }
 
     status = sx1280_get_irq_status(&irq_status);

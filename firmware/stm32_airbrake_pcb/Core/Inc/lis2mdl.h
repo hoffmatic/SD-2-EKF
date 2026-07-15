@@ -1,21 +1,13 @@
-/*
- * PROJECT FILE OVERVIEW
- * Comment made: 2026-07-07 17:44:48 -04:00
+/**
+ * @file lis2mdl.h
+ * @brief LIS2MDL magnetometer health/telemetry driver.
  *
- * What this file does:
- *   This header describes the LIS2MDL magnetometer driver. The magnetometer is included for board health and telemetry, not for the first vertical EKF.
- *
- * Process flow:
- *   Startup verifies the I2C3 device and configures it for continuous readings. Telemetry can include raw X, Y, and Z magnetic readings.
- *
- * Main variables and what can be changed:
- *   The I2C address and register settings should only change if hardware or desired magnetometer mode changes.
- *
- * Assumptions:
- *   A magnetometer fault should be visible but should not stop the vertical IMU and barometer estimator.
- *
- * What is missing:
- *   No calibration, tilt-compensated heading, or attitude-estimator use is implemented.
+ * The driver verifies the I2C3 device, configures continuous high-resolution
+ * conversion, and returns raw signed X/Y/Z counts.  Magnetic data is retained
+ * for board health and future attitude work; it does not enter the current
+ * vertical EKF.  A LIS2MDL failure therefore remains visible without stopping
+ * IMU/barometer estimation.  No hard/soft-iron calibration or heading solution
+ * is provided yet.  See CODE_GUIDE.md [ARCH-2].
  */
 
 #ifndef LIS2MDL_H
@@ -28,14 +20,7 @@ extern "C" {
 #include "stm32h5xx_hal.h"
 #include <stdint.h>
 
-/*
- * LIS2MDL magnetometer driver.
- *
- * The first vertical-only EKF does not use magnetic field data for estimation.
- * We still initialize and read the magnetometer so telemetry can show whether
- * the I2C3 device is alive and whether the PCB is seeing plausible field data.
- */
-
+/* Device identity and register map. */
 #define LIS2MDL_I2C_ADDR             0x1EU
 #define LIS2MDL_WHO_AM_I_REG         0x4FU
 #define LIS2MDL_WHO_AM_I_VALUE       0x40U
@@ -46,7 +31,7 @@ extern "C" {
 #define LIS2MDL_STATUS_REG           0x67U
 #define LIS2MDL_OUTX_L_REG           0x68U
 
-// Data order returned by LIS2MDL_ReadData()
+/** Stable raw-count array order returned by LIS2MDL_ReadData(). */
 typedef enum
 {
     LIS2MDL_MAG_X = 0,
@@ -67,18 +52,21 @@ typedef struct
     uint8_t who_am_i;
 } LIS2MDL_HandleTypeDef;
 
-/* Configure the magnetometer for continuous high-resolution measurements. */
+/** @brief Identify and configure continuous high-resolution measurements. */
 HAL_StatusTypeDef LIS2MDL_Init(LIS2MDL_HandleTypeDef *dev);
 
-/* Direct register checks used to separate wiring faults from data faults. */
+/** @brief Read and return WHO_AM_I for wiring/identity diagnosis. */
 HAL_StatusTypeDef LIS2MDL_ReadWhoAmI(LIS2MDL_HandleTypeDef *dev, uint8_t *who_am_i);
+/** @brief Read data-ready/overrun status bits. */
 HAL_StatusTypeDef LIS2MDL_ReadStatus(LIS2MDL_HandleTypeDef *dev, uint8_t *status);
 
-// Fills data[3] as: mag_x, mag_y, mag_z. Raw two's-complement magnetic readings.
-HAL_StatusTypeDef LIS2MDL_ReadData(LIS2MDL_HandleTypeDef *dev, int16_t data[LIS2MDL_DATA_COUNT]);
+/** @brief Read raw two's-complement X/Y/Z magnetic counts. */
+HAL_StatusTypeDef LIS2MDL_ReadData(
+    LIS2MDL_HandleTypeDef *dev,
+    int16_t data[LIS2MDL_DATA_COUNT]);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif // LIS2MDL_H
+#endif /* LIS2MDL_H */

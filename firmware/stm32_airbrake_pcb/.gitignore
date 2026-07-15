@@ -1,0 +1,6 @@
+# STM32CubeIDE build products are reproducible and machine-specific.
+/Debug/
+/Release/
+
+# Per-user CubeIDE view state is not part of the firmware build.
+/.settings/com.st.stm32cube.ide.mcu.sfrview.prefs

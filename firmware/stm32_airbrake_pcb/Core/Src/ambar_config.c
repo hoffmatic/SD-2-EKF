@@ -1,21 +1,11 @@
-/*
- * PROJECT FILE OVERVIEW
- * Comment made: 2026-07-07 18:31:46 -04:00
+/**
+ * @file ambar_config.c
+ * @brief Implement safe defaults, record validation, and redundant flash I/O.
  *
- * What this file does:
- *   This file loads, checks, and saves the Airbrake PCB bench configuration. It is the bridge between safe hard-coded defaults and editable flash settings.
- *
- * Process flow:
- *   Defaults are filled first. Flash load reads the primary config record, checks magic/version/size/CRC and value ranges, then tries the backup record if the primary fails. Save writes both records after sector erase.
- *
- * Main variables and what can be changed:
- *   AmbarConfig_LoadDefaults is the safe starting point for all tunable values. The range checks in AmbarConfig_Validate decide which flash settings are accepted.
- *
- * Assumptions:
- *   A bad config is safer than a silent config. Bad flash data falls back to defaults and reports status flags for telemetry.
- *
- * What is missing:
- *   There is no multi-version migration logic, no authenticated command source, and no automatic calibration wizard yet.
+ * Sections: CRC helpers -> compiled defaults -> value validation -> record I/O
+ * -> public status.  Flash operations are blocking and must be invoked only by
+ * the application maintenance path while motion is off.  See CODE_GUIDE.md
+ * [ARCH-7].
  */
 
 #include "ambar_config.h"
@@ -23,6 +13,11 @@
 #include <math.h>
 #include <string.h>
 
+/* -------------------------------------------------------------------------- */
+/* Module status and record integrity helpers                                 */
+/* -------------------------------------------------------------------------- */
+
+/** Cumulative state exported to telemetry; defaults are true at reset. */
 static uint32_t s_config_status_flags = AMBAR_CONFIG_STATUS_DEFAULTS_USED;
 
 uint32_t AmbarConfig_Crc32(const uint8_t *data, size_t length)
@@ -59,6 +54,7 @@ uint32_t AmbarConfig_Crc32(const uint8_t *data, size_t length)
 
 static uint32_t ambar_config_record_crc(const AmbarConfig_t *config)
 {
+    /* The stored crc32 word is excluded by evaluating a copy with crc32=0. */
     AmbarConfig_t copy;
 
     if (config == NULL)
@@ -73,6 +69,7 @@ static uint32_t ambar_config_record_crc(const AmbarConfig_t *config)
 
 void AmbarConfig_LoadDefaults(AmbarConfig_t *config)
 {
+    /* Defaults are always constructed before any untrusted flash read. */
     if (config == NULL)
     {
         return;
@@ -98,11 +95,15 @@ void AmbarConfig_LoadDefaults(AmbarConfig_t *config)
 
 static bool ambar_float_in_range(float value, float lower, float upper)
 {
+    /* Reject NaN/Inf explicitly; ordinary comparisons alone do not explain it. */
     return isfinite(value) && value >= lower && value <= upper;
 }
 
 bool AmbarConfig_Validate(const AmbarConfig_t *config)
 {
+    /* Validation is intentionally exhaustive because accepted fields reach the
+     * estimator, phase machine, and motor driver without another schema check.
+     */
     if (config == NULL)
     {
         return false;
@@ -159,6 +160,7 @@ bool AmbarConfig_Validate(const AmbarConfig_t *config)
 
 static HAL_StatusTypeDef ambar_config_read_record(uint32_t address, AmbarConfig_t *config)
 {
+    /* Read one complete candidate, then validate identity/CRC/value as a unit. */
     HAL_StatusTypeDef status;
 
     if (config == NULL)
@@ -177,6 +179,7 @@ static HAL_StatusTypeDef ambar_config_read_record(uint32_t address, AmbarConfig_
 
 HAL_StatusTypeDef AmbarConfig_LoadFromFlash(AmbarConfig_t *config)
 {
+    /* Prefer the newest valid generation; one corrupt sector is survivable. */
     HAL_StatusTypeDef status;
 
     if (config == NULL)
@@ -205,6 +208,7 @@ HAL_StatusTypeDef AmbarConfig_LoadFromFlash(AmbarConfig_t *config)
 
 static HAL_StatusTypeDef ambar_config_write_record(uint32_t address, const AmbarConfig_t *config)
 {
+    /* Each record owns one sector so erase/program operations cannot overlap. */
     HAL_StatusTypeDef status;
 
     status = W25Q64_EraseSector(address);
@@ -218,6 +222,9 @@ static HAL_StatusTypeDef ambar_config_write_record(uint32_t address, const Ambar
 
 HAL_StatusTypeDef AmbarConfig_SaveToFlash(const AmbarConfig_t *config)
 {
+    /* Save is all-or-error from the caller's perspective; status flags retain
+     * enough detail for telemetry and bench diagnosis.
+     */
     AmbarConfig_t writable;
     HAL_StatusTypeDef status;
 

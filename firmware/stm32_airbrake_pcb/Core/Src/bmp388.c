@@ -1,21 +1,10 @@
-/*
- * PROJECT FILE OVERVIEW
- * Comment made: 2026-07-07 17:44:48 -04:00
+/**
+ * @file bmp388.c
+ * @brief Polling I2C implementation and Bosch compensation mathematics.
  *
- * What this file does:
- *   This file talks to the BMP388 over I2C2 and turns raw pressure counts into pressure in pascals and temperature in degrees C.
- *
- * Process flow:
- *   The driver checks the sensor, resets it, reads calibration numbers, sets oversampling, filter, and output rate, then enables normal mode. Each sample is read raw and compensated before altitude code uses it.
- *
- * Main variables and what can be changed:
- *   BMP388_OSR, BMP388_ODR, and BMP388_CONFIG writes control sample smoothness and rate. Tune them after measuring noise and delay.
- *
- * Assumptions:
- *   The compensation formulas match the Bosch datasheet. I2C2 is wired to address 0x76 unless the PCB strap changes.
- *
- * What is missing:
- *   No data-ready interrupt support, pressure-port calibration, or long-term drift correction beyond the EKF bias state is included.
+ * Sections: bus helpers -> trim decoding -> public status/init -> raw sampling
+ * -> compensation.  All bus operations share one timeout and the unshifted
+ * address stored in the device handle.  See bmp388.h and CODE_GUIDE.md [ARCH-2].
  */
 
 #include "bmp388.h"
@@ -23,14 +12,9 @@
 #include <stddef.h>
 #include <string.h>
 
-/*
- * ===================== AMBAR EKF PCB INTEGRATION - UPDATED FILE =====================
- *
- * The original BMP388 support was enough for a chip-ID check and raw telemetry.
- * The vertical EKF needs pressure in pascals, so this file now reads the Bosch
- * calibration registers at boot and applies the datasheet compensation math to
- * every pressure/temperature sample used by the flight estimator.
- */
+/* -------------------------------------------------------------------------- */
+/* Bus configuration and private register helpers                             */
+/* -------------------------------------------------------------------------- */
 
 #define BMP388_I2C_TIMEOUT_MS        100U
 #define BMP388_ADDR(dev)             ((uint16_t)((dev)->addr_7bit << 1))
@@ -121,9 +105,7 @@ static HAL_StatusTypeDef bmp388_read_calibration(BMP388_HandleTypeDef *dev)
     }
 
     /*
-     * BEGIN AMBAR EKF PCB INTEGRATION - NEW CALIBRATION READBACK
-     *
-     * The BMP388 stores 21 bytes of trim data.  The bytes are little-endian and
+     * The BMP388 stores 21 bytes of trim data. The bytes are little-endian and
      * mixed signed/unsigned, so decode them explicitly before scaling them into
      * the coefficients used by the Bosch compensation equations.
      */
@@ -160,10 +142,12 @@ static HAL_StatusTypeDef bmp388_read_calibration(BMP388_HandleTypeDef *dev)
     cal->par_p10 = (double)raw_p10 / 281474976710656.0;
     cal->par_p11 = (double)raw_p11 / 36893488147419103232.0;
     cal->loaded = 1U;
-    /* END AMBAR EKF PCB INTEGRATION - NEW CALIBRATION READBACK */
-
     return HAL_OK;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Public identification and initialization API                               */
+/* -------------------------------------------------------------------------- */
 
 HAL_StatusTypeDef BMP388_ReadChipID(BMP388_HandleTypeDef *dev, uint8_t *chip_id)
 {
@@ -217,30 +201,26 @@ HAL_StatusTypeDef BMP388_Init(BMP388_HandleTypeDef *dev)
     if (status != HAL_OK) { return status; }
     if (dev->chip_id != BMP388_CHIP_ID_VALUE) { return HAL_ERROR; }
 
-    /*
-     * BEGIN AMBAR EKF PCB INTEGRATION - NEW BOOT-TIME CALIBRATION LOAD
-     *
-     * Calibration must be read after reset and before any compensated samples.
+    /* Calibration must be read after reset and before compensated samples.
      * If this fails, the barometer is treated as unavailable and the EKF remains
      * inhibited instead of using unscaled pressure counts.
      */
     status = bmp388_read_calibration(dev);
     if (status != HAL_OK) { return status; }
-    /* END AMBAR EKF PCB INTEGRATION - NEW BOOT-TIME CALIBRATION LOAD */
 
-    // OSR: pressure x4, temperature x2 -> osr_p=010, osr_t=001.
+    /* OSR: pressure x4, temperature x2 -> osr_p=010, osr_t=001. */
     status = bmp388_write_u8(dev, BMP388_OSR, 0x0AU);
     if (status != HAL_OK) { return status; }
 
-    // ODR: 50 Hz.
+    /* ODR: 50 Hz. */
     status = bmp388_write_u8(dev, BMP388_ODR, 0x02U);
     if (status != HAL_OK) { return status; }
 
-    // CONFIG: IIR coefficient 3. Set to 0x00 if you want no pressure smoothing.
+    /* IIR coefficient 3; use 0x00 only after validating unsmoothed noise. */
     status = bmp388_write_u8(dev, BMP388_CONFIG, 0x04U);
     if (status != HAL_OK) { return status; }
 
-    // PWR_CTRL: press_en=1, temp_en=1, normal mode=11.
+    /* PWR_CTRL: pressure and temperature enabled, normal mode. */
     status = bmp388_write_u8(dev, BMP388_PWR_CTRL, 0x33U);
     if (status != HAL_OK) { return status; }
 
@@ -290,10 +270,7 @@ HAL_StatusTypeDef BMP388_CompensateRawData(BMP388_HandleTypeDef *dev,
         return HAL_ERROR;
     }
 
-    /*
-     * BEGIN AMBAR EKF PCB INTEGRATION - NEW PRESSURE COMPENSATION
-     *
-     * This follows the Bosch BMP388 compensation flow:
+    /* This follows the Bosch BMP388 compensation flow:
      *   1. Build a linearized temperature value, t_lin.
      *   2. Use t_lin and the raw pressure count to compensate pressure.
      *   3. Return practical float values to the rest of the flight code.
@@ -329,7 +306,6 @@ HAL_StatusTypeDef BMP388_CompensateRawData(BMP388_HandleTypeDef *dev,
     *temperature_c = (float)t;
     *pressure_pa = (float)(partial_out1 + partial_out2 + partial_data4);
 
-    /* END AMBAR EKF PCB INTEGRATION - NEW PRESSURE COMPENSATION */
     return HAL_OK;
 }
 

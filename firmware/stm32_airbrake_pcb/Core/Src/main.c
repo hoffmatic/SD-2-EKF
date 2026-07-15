@@ -32,9 +32,9 @@
  *   rocket_sensors -> sensor init, raw reads, and SI-unit conversions.
  *   device drivers -> individual chip register access.
  */
-/* BEGIN AMBAR EKF PCB INTEGRATION - NEW APPLICATION SCHEDULER INCLUDE */
+/* Project-owned cooperative application; see CODE_GUIDE.md [ARCH-1]. */
 #include "ambar_app.h"
-/* END AMBAR EKF PCB INTEGRATION - NEW APPLICATION SCHEDULER INCLUDE */
+#include "ambar_features.h"
 #include "radio_bridge.h"
 #include "rocket_sensors.h"
 #include "lsm6dsv32x.h"
@@ -63,6 +63,14 @@
 #define W25Q_EXPECTED_CAPACITY            0x17U
 #define SX1280_GET_STATUS_CMD  0xC0U
 #define SX1280_BUSY_TIMEOUT_MS 100U
+#if AMBAR_FEATURE_WATCHDOG
+/* 32 kHz nominal LSI / 128 prescaler, reload 3999 -> approximately 16 seconds. */
+#define AMBAR_WATCHDOG_RELOAD            3999U
+#define AMBAR_WATCHDOG_INIT_TIMEOUT_MS   100U
+#define AMBAR_IWDG_KEY_ENABLE            0x0000CCCCUL
+#define AMBAR_IWDG_KEY_WRITE_ACCESS      0x00005555UL
+#define AMBAR_IWDG_KEY_RELOAD            0x0000AAAAUL
+#endif
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -112,7 +120,9 @@ static void MX_ICACHE_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_SPI2_Init(void);
 static void MX_SPI3_Init(void);
-static void MX_USB_PCD_Init(void);
+#if AMBAR_FEATURE_USB_PROTOCOL
+static HAL_StatusTypeDef MX_USB_PCD_Init(void);
+#endif
 static void MX_I2C2_Init(void);
 /* USER CODE BEGIN PFP */
 /*
@@ -125,10 +135,45 @@ static HAL_StatusTypeDef Flash_ReadJedecId(uint8_t jedec_id[3]);
 static HAL_StatusTypeDef SX1280_WaitWhileBusy(uint32_t timeout_ms);
 static HAL_StatusTypeDef SX1280_ReadStatus(uint8_t *status_byte);
 static HAL_StatusTypeDef SX1280_BringupTest(uint8_t *status_byte);
+#if AMBAR_FEATURE_WATCHDOG
+static HAL_StatusTypeDef AmbarWatchdog_Init(void);
+static void AmbarWatchdog_Refresh(void);
+#endif
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+#if AMBAR_FEATURE_WATCHDOG
+static HAL_StatusTypeDef AmbarWatchdog_Init(void)
+{
+  const uint32_t update_flags = IWDG_SR_PVU | IWDG_SR_RVU | IWDG_SR_WVU;
+  const uint32_t start_ms = HAL_GetTick();
+
+  /* Starting IWDG also starts its LSI clock on STM32H5. */
+  IWDG->KR = AMBAR_IWDG_KEY_ENABLE;
+  IWDG->KR = AMBAR_IWDG_KEY_WRITE_ACCESS;
+  IWDG->PR = IWDG_PR_PR_2 | IWDG_PR_PR_0; /* divide by 128 */
+  IWDG->RLR = AMBAR_WATCHDOG_RELOAD;
+  IWDG->WINR = IWDG_WINR_WIN; /* window disabled */
+
+  while ((IWDG->SR & update_flags) != 0U)
+  {
+    if ((uint32_t)(HAL_GetTick() - start_ms) >= AMBAR_WATCHDOG_INIT_TIMEOUT_MS)
+    {
+      return HAL_TIMEOUT;
+    }
+  }
+
+  IWDG->KR = AMBAR_IWDG_KEY_RELOAD;
+  return HAL_OK;
+}
+
+static void AmbarWatchdog_Refresh(void)
+{
+  IWDG->KR = AMBAR_IWDG_KEY_RELOAD;
+}
+#endif
+
 static HAL_StatusTypeDef BMP388_ReadChipId(uint8_t *chip_id)
 {
   /*
@@ -285,7 +330,10 @@ int main(void)
   MX_SPI1_Init();
   MX_SPI2_Init();
   MX_SPI3_Init();
-  MX_USB_PCD_Init();
+#if AMBAR_FEATURE_USB_PROTOCOL
+  /* USB is optional: a setup failure must not stop the flight application. */
+  (void)MX_USB_PCD_Init();
+#endif
   MX_I2C2_Init();
   /* USER CODE BEGIN 2 */
   /*
@@ -336,6 +384,7 @@ int main(void)
   }
 
   /* LED_5 means the SX1280 reset, cleared BUSY, and answered a status command. */
+#if AMBAR_FEATURE_RADIO
   sx1280_status = SX1280_BringupTest(&sx1280_status_byte);
   if (sx1280_status == HAL_OK && sx1280_status_byte != 0x00 && sx1280_status_byte != 0xFF)
   {
@@ -346,6 +395,11 @@ int main(void)
   {
     HAL_GPIO_WritePin(LED_5_GPIO_Port, LED_5_Pin, GPIO_PIN_RESET);
   }
+#else
+  sx1280_status = HAL_ERROR;
+  sx1280_status_byte = 0U;
+  HAL_GPIO_WritePin(LED_5_GPIO_Port, LED_5_Pin, GPIO_PIN_RESET);
+#endif
   if (sx1280_status == HAL_OK && sx1280_status_byte != 0x00 && sx1280_status_byte != 0xFF)
   {
     /*
@@ -361,18 +415,24 @@ int main(void)
   }
 
   /*
-   * BEGIN AMBAR EKF PCB INTEGRATION - FLIGHT APP STARTUP
-   *
    * RocketSensors_Init() now prepares the IMU and compensated BMP388 path for
    * EKF use.  AmbarApp_Init() captures the pad reference, resets the estimator,
    * and leaves the actuator disabled unless every safety gate is satisfied.
-   */
+  */
   HAL_StatusTypeDef sensor_status = RocketSensors_Init();
-  HAL_StatusTypeDef radio_status = RadioBridge_Init();
+  HAL_StatusTypeDef radio_status = HAL_ERROR;
+#if AMBAR_FEATURE_RADIO
+  radio_status = RadioBridge_Init();
+#endif
   AmbarApp_Init(sensor_status,
                 radio_status,
                 tmc5240_status == HAL_OK ? 1U : 0U);
-  /* END AMBAR EKF PCB INTEGRATION - FLIGHT APP STARTUP */
+#if AMBAR_FEATURE_WATCHDOG
+  if (AmbarWatchdog_Init() != HAL_OK)
+  {
+    Error_Handler();
+  }
+#endif
 
   /* USER CODE END 2 */
 
@@ -384,14 +444,15 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     /*
-     * BEGIN AMBAR EKF PCB INTEGRATION - NONBLOCKING FLIGHT LOOP
-     *
      * The old one-second polling delay is replaced with a scheduler in
-     * AmbarApp_Task(): IMU at about 125 Hz, barometer at 50 Hz, and telemetry
-     * at 5 Hz.  This keeps sensor fusion responsive without blocking radio work.
-     */
+     * AmbarApp_Task(): IMU at about 125 Hz, barometer at 50 Hz, and full
+     * telemetry at 1 Hz.  Radio TX is serviced asynchronously so sensor fusion
+     * remains responsive while a long packet is on air.
+    */
     AmbarApp_Task();
-    /* END AMBAR EKF PCB INTEGRATION - NONBLOCKING FLIGHT LOOP */
+#if AMBAR_FEATURE_WATCHDOG
+    AmbarWatchdog_Refresh();
+#endif
   }
   /* USER CODE END 3 */
 }
@@ -414,9 +475,8 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48|RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS_DIGITAL;
-  RCC_OscInitStruct.HSI48State = RCC_HSI48_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLL1_SOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLM = 6;
@@ -776,16 +836,38 @@ static void MX_SPI3_Init(void)
 /**
   * @brief USB Initialization Function
   * @param None
-  * @retval None
+  * @retval HAL status; failure leaves the optional USB transport disabled
   */
-static void MX_USB_PCD_Init(void)
+#if AMBAR_FEATURE_USB_PROTOCOL
+static HAL_StatusTypeDef MX_USB_PCD_Init(void)
 {
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
 
   /* USER CODE BEGIN USB_Init 0 */
 
   /* USER CODE END USB_Init 0 */
 
   /* USER CODE BEGIN USB_Init 1 */
+
+  /*
+   * USB is optional. Keep HSI48 out of SystemClock_Config() so a USB-clock
+   * failure cannot stop the HSE/PLL flight clock or the rest of the firmware.
+   */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48;
+  RCC_OscInitStruct.HSI48State = RCC_HSI48_ON;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    return HAL_ERROR;
+  }
+
+  PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_USB;
+  PeriphClkInitStruct.UsbClockSelection = RCC_USBCLKSOURCE_HSI48;
+  if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
+  {
+    return HAL_ERROR;
+  }
 
   /* USER CODE END USB_Init 1 */
   hpcd_USB_DRD_FS.Instance = USB_DRD_FS;
@@ -801,13 +883,28 @@ static void MX_USB_PCD_Init(void)
   hpcd_USB_DRD_FS.Init.iso_singlebuffer_enable = DISABLE;
   if (HAL_PCD_Init(&hpcd_USB_DRD_FS) != HAL_OK)
   {
-    Error_Handler();
+    (void)HAL_PCD_DeInit(&hpcd_USB_DRD_FS);
+    return HAL_ERROR;
   }
   /* USER CODE BEGIN USB_Init 2 */
+
+  /* USBX CDC ACM endpoint packet-memory layout (full-speed, single buffer). */
+  if (HAL_PCDEx_PMAConfig(&hpcd_USB_DRD_FS, 0x00U, PCD_SNG_BUF, 0x14U) != HAL_OK
+      || HAL_PCDEx_PMAConfig(&hpcd_USB_DRD_FS, 0x80U, PCD_SNG_BUF, 0x54U) != HAL_OK
+      || HAL_PCDEx_PMAConfig(&hpcd_USB_DRD_FS, 0x81U, PCD_SNG_BUF, 0x94U) != HAL_OK
+      || HAL_PCDEx_PMAConfig(&hpcd_USB_DRD_FS, 0x01U, PCD_SNG_BUF, 0xD4U) != HAL_OK
+      || HAL_PCDEx_PMAConfig(&hpcd_USB_DRD_FS, 0x82U, PCD_SNG_BUF, 0x114U) != HAL_OK)
+  {
+    (void)HAL_PCD_DeInit(&hpcd_USB_DRD_FS);
+    return HAL_ERROR;
+  }
+
+  return HAL_OK;
 
   /* USER CODE END USB_Init 2 */
 
 }
+#endif
 
 /**
   * @brief GPIO Initialization Function
@@ -912,16 +1009,12 @@ static void MX_GPIO_Init(void)
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
   /*
-   * BEGIN AMBAR BENCH-GATED EXPANSION - EXTI ENABLES
-   *
    * These interrupts only latch flags.  Sensor reads, radio packets, and motor
    * safety actions still run from the cooperative scheduler so the interrupt
    * path remains short and predictable.
    */
   HAL_NVIC_SetPriority(EXTI4_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(EXTI4_IRQn);
-  HAL_NVIC_SetPriority(EXTI5_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(EXTI5_IRQn);
   HAL_NVIC_SetPriority(EXTI6_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(EXTI6_IRQn);
   HAL_NVIC_SetPriority(EXTI7_IRQn, 5, 0);
@@ -932,7 +1025,6 @@ static void MX_GPIO_Init(void)
   HAL_NVIC_EnableIRQ(EXTI14_IRQn);
   HAL_NVIC_SetPriority(EXTI15_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(EXTI15_IRQn);
-  /* END AMBAR BENCH-GATED EXPANSION - EXTI ENABLES */
 
   /* USER CODE END MX_GPIO_Init_2 */
 }

@@ -176,6 +176,16 @@ flow, file dependency map, and the intended use case for each executable.
 - [firmware/stm32_airbrake_pcb](firmware/stm32_airbrake_pcb): STM32CubeIDE
   project copy for the Airbrake PCB, including the C EKF port, flash logging,
   radio command parsing, telemetry additions, and bench-gated actuator layer.
+- [hardware/airbrake_pcb](hardware/airbrake_pcb): KiCad PCB project and local
+  component libraries copied from the Airbrake PCB design folder.
+- [hardware/datasheets](hardware/datasheets): local component datasheets used
+  for firmware constants, bus assumptions, and safety notes.
+- [firmware/rust_controller_reference](firmware/rust_controller_reference):
+  standalone Rust controller reference copied from the local PCB folder.
+- [tools/arduino_ide_shortcut](tools/arduino_ide_shortcut): readable extraction
+  of the local Arduino IDE shortcut metadata.
+- [tools/arduino_ground_receiver](tools/arduino_ground_receiver): Arduino/LILYGO
+  SX1280 receiver sketch that decodes the STM32 binary EKF telemetry packets.
 
 Older V2 screenshot notes and outdated BOM mismatch notes were removed from the
 live repo so GitHub only presents the current working baseline.
