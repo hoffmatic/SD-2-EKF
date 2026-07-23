@@ -1,53 +1,54 @@
 # OpenRocket USB simulation operator guide
 
-This workflow replays an OpenRocket trajectory into the STM32 over its direct
-USB CDC connection. It is an **open-loop input replay**: the CSV supplies the
-flight path, while STM32 telemetry shows the phase, estimated state, predicted
-apogee, and airbrake deployment. The tool supports a default inhibited workflow
-and a separately gated presentation-motion workflow.
+This historical finite workflow replays an OpenRocket trajectory into the STM32
+over its direct USB CDC connection. It remains useful for trajectory inspection,
+CSV normalization, and bounded USB replay. It is an **open-loop input replay**:
+the CSV supplies the flight path, while STM32 telemetry shows the phase,
+estimated state, predicted apogee, and raw airbrake-controller demand.
+
+For repeated RocketPy cases plus one forced 0 -> 3 rotations -> 0 TMC
+ramp-state sequence per case, use the root
+`Run AMBAR Continuous HIL Test.cmd` launcher and
+the continuous-test commissioning guide instead. The finite replay does not
+connect raw controller demand directly to physical motor demand.
 
 ## Current safety boundary
 
-The current demo copy is explicitly identified in `Core/Inc/ambar_features.h`:
+There are two compile-time build profiles in `Core/Inc/ambar_features.h`:
 
-```c
-#define AMBAR_FEATURE_PRESENTATION_MOTION 1
-#define AMBAR_FEATURE_ACTUATOR AMBAR_FEATURE_PRESENTATION_MOTION
-#define AMBAR_FEATURE_BENCH_ACTUATOR_COMMANDS AMBAR_FEATURE_PRESENTATION_MOTION
-```
+- `AMBAR_BUILD_PROFILE_NORMAL` is the default. It retains the real flight path
+  and rejects simulation, HIL override, HOME/retract, and arbitrary bench-motion
+  commands.
+- `AMBAR_BUILD_PROFILE_CONTINUOUS_HIL` enables USB replay, software-zero
+  geometry, guarded bench checkout, and the separate forced-motion override.
 
-Set the presentation switch to `0`, rebuild, and reflash for a motion-inhibited
-USB/sensor showcase. With it at `1`, startup is still unhomed and DRV_ENN stays
-disabled. Physical replay additionally requires both
-`--allow-actuator-motion` and `--home-at-current-position`; the board must report
-the presentation, USB, simulation, actuator, and bench feature bits plus a
-healthy TMC5240 and valid configuration. `HOME` does not seek a switch: it
-declares the mechanism's current physical position to be fully retracted.
+The named artifacts are `Normal/ambar_normal.elf` and
+`Continuous_HIL/ambar_continuous_hil.elf`. Reflashing is the authoritative mode
+boundary. The Desktop build-and-flash launchers verify the image on disk,
+program it, and then query only `PING` and `REQUEST_SNAPSHOT` to prove the
+connected board reports the requested profile.
 
-The presentation feature forces the reviewed prototype register profile on
-each boot so saved flash data cannot silently change it: 153600 counts full
-travel, VMAX 200000, AMAX 20000, IHOLD 16, IRUN 31, GLOBALSCALER 0, and the
-compile-time direction setting. Those are register values copied from the
-prototype that moved; they are **not calibrated mA, torque, force capacity, or
-flight-qualified limits**. Use a current-limited supply, a physical power/ENN
-cutoff, and an uncoupled or low-risk mechanism for the first powered checkout.
-In live motion mode the host also rejects any mechanical CLI values other than
-the matching 3 rotations, 200 full steps/rev, 256 microsteps, and 1:1 gearing,
-and reports whether the firmware uses positive or negative extension counts.
+Neither image moves on boot. The existing PCB is unchanged and has no
+HOME/FULL switches or actuator encoder. HIL motion requires an explicitly
+operator-confirmed software HOME, a healthy TMC5240, an armed and fresh
+simulation, and host command `0x22`. Raw STM32 controller demand is telemetry
+only in HIL. The supervisor independently commands FORCE_FULL and FORCE_HOME
+and labels both signals separately.
 
-Do not bypass preflight. Motion mode establishes DISARM/SIM_STOP, verifies an
-energy-off actuator, declares HOME, verifies actual position at HOME, starts the
-simulation, and arms only after fresh samples and `SIMULATION_ACTIVE`. It
-continuously rejects stale telemetry or actuator status. The host uses
-`time.perf_counter()` for its absolute schedule. Late rows are skipped instead
-of being burst; host lag over 100 ms aborts, and a completed run fails acceptance
-if more than 2% of samples were skipped. After a real automatic deployment,
-healthy/armed on-target, descent, or recovery output can make one bounded return
-to HOME. That return has progress and absolute timeouts. Firmware stops and
-de-energizes instead on DISARM, SIM_STOP, end-of-stream, a 500 ms data gap, USB
-loss, DIAG/DRV fault, or lost estimator/arming authority. At normal completion
-the host also performs and verifies an explicit retract before declaring PASS.
-An error/Ctrl+C stops in place and does not attempt a blind retract.
+The HIL profile fixes full travel at 153600 driver counts (three rotations with
+the prototype conversion), VMAX 200000, AMAX 20000, IHOLD 16, IRUN 31,
+GLOBALSCALER 0, and the compile-time direction setting. These are register
+values, **not calibrated mA, torque, force capacity, encoder measurements, or
+flight-qualified limits**. Use a current-limited supply, an independent
+latching motor-power/ENN cutoff, and an uncoupled or low-risk mechanism for
+first powered checkout. TMC `XACTUAL` is internal driver state, not independent
+proof of mechanical position.
+
+`--home-at-current-position` is an explicit operator acknowledgement that the
+mechanism has been manually placed fully closed. `CMD_HOME` then declares the
+current TMC ramp position as `XACTUAL=0` without seeking or motor motion.
+DISARM, `SIM_STOP`, stale input, USB loss, ESTOP, reboot, or any latched fault
+clears override and removes motor energy.
 
 ## Supplied CSV audit
 
@@ -134,22 +135,22 @@ Run these commands from the project's `tools\usb_protocol` folder.
    assumptions. Its velocity/acceleration are still provisional until the
    source is re-exported with the true Vertical columns.
 
-3. For an energy-off USB streaming smoke test, first set
-   `AMBAR_FEATURE_PRESENTATION_MOTION` to `0`, rebuild, and reflash. Then run:
+3. For an energy-off USB streaming smoke test, flash
+   `Continuous_HIL/ambar_continuous_hil.elf` and run:
 
    ```powershell
    & $python replay_openrocket.py "..\..\SimulationData\Source\26-07-10_Openrocket_Run.csv" --live --allow-derived-vertical --no-arm
    ```
 
-   The current motion-enabled demo firmware intentionally refuses this default
-   live mode; that prevents a motion-capable board from being mistaken for an
-   inhibited build.
+   This replays data without arming and without issuing a HIL override. The
+   board reports the controller result, but the motor remains de-energized.
+   NORMAL intentionally rejects simulation input.
 
 4. Before applying motor power, mechanically place the brakes fully retracted,
    remove hands/tools, use a current-limited supply, keep an immediate physical
    power/ENN cutoff reachable, and preferably disconnect the linkage for the
-   first direction test. The software watchdog is disabled for debugger-friendly
-   presentations, so the physical cutoff is mandatory.
+   first direction test. The firmware watchdog is enabled, but it is not a
+   substitute for the independent physical cutoff.
 
 5. Run a two-percent direction/travel checkout before any full trajectory:
 
@@ -157,36 +158,32 @@ Run these commands from the project's `tools\usb_protocol` folder.
    & $python actuator_checkout.py --percent 2 --allow-actuator-motion --home-at-current-position
    ```
 
-   This declares the current position HOME, commands 3072 counts (or -3072 when
-   the compiled direction bit is inverted), waits for the motor to stop, then
-   retracts and verifies the driver is off. Watch the mechanism continuously.
-   If extension moves toward a hard stop, cut motor power immediately. Change
-   `AMBAR_PRESENTATION_ACTUATOR_DIRECTION_INVERTED` in
-   `Core/Inc/ambar_features.h`, rebuild, reflash, and repeat. Do not advance to a
-   full replay until this low-travel check moves in the correct direction and
-   returns to the same physical HOME.
+   The flag confirms the mechanism is manually fully closed. Firmware declares
+   that position as software zero without moving, commands 3072 counts (or
+   -3072 when direction is inverted), then returns to zero and verifies the
+   driver is off. Watch the mechanism continuously because `XACTUAL` is not
+   physical position feedback. If extension moves toward a hard stop, cut
+   motor power immediately. Change `AMBAR_ACTUATOR_DIRECTION_INVERTED` in
+   `Core/Inc/ambar_features.h`, rebuild, reflash, and repeat.
 
-6. Run the synthetic presentation replay and allow the real STM32 controller to
-   move the motor. Record a durable evidence bundle; add the UDP option when the
-   partner GUI is listening on that localhost port:
+6. Use `replay_openrocket.py` only for finite data replay and evidence-bundle
+   compatibility. Do not use its raw controller output as a physical actuator
+   command. The supported full-stroke hardware path is:
 
    ```powershell
-   & $python replay_openrocket.py "..\..\SimulationData\Source\26-07-10_Openrocket_Run.csv" --live --allow-derived-vertical --allow-actuator-motion --home-at-current-position --run-bundle "..\..\SimulationData\Evidence\rehearsal-01" --gui-udp-port 52100
+   ..\..\..\..\Run AMBAR Continuous HIL Test.cmd
    ```
 
-   The target apogee is 914.4 m (3000 ft), the stream is 50 Hz, and the replay
-   stops two seconds after OpenRocket apogee. Omit `--port` to auto-detect
-   `0483:5740`. This exact supplied profile drives the real C flight stack to a
-   100% request, so it can command the full 153600-count assumed travel. Do not
-   use it as the first powered direction test.
+   That launcher requires the mechanism to be manually fully closed. The
+   supervisor validates the HIL profile and driver, declares software HOME once
+   per process, replays generated RocketPy cases, records raw controller
+   demand, then separately forces 153600 and zero through command `0x22`.
 
-7. Progress output shows board-reported target and actual counts. A normal finish
-   prints that RETRACT completed and the driver is off, followed by `Replay
-   acceptance verdict: PASS`. Inspect `manifest.json`, `packets.jsonl`, and
-   `verdict.json` in the selected bundle directory. If the run aborts, the tool
-   sends DISARM/SIM_STOP, writes a FAIL verdict when a bundle was requested, and
-   leaves the mechanism stopped in place; inspect the cause before issuing any
-   separate retract.
+7. Inspect continuous results under
+   `%LOCALAPPDATA%\AMBAR\TestRuns\<session-id>\`. SQLite is the live source of
+   truth; every finalized run also has its case, trajectory, telemetry,
+   configuration, manifest, verdict, and portable CSV exports. A fault stops
+   the entire session and never resumes automatically.
 
 8. In the GUI, plot at least altitude, vertical velocity, predicted apogee,
    phase, deployment percent, and actuator target/actual counts. Treat the 55 N
@@ -199,12 +196,12 @@ Run these commands from the project's `tools\usb_protocol` folder.
    `rocket_protocol.py` on its one serial connection. Two programs cannot share
    one COM port.
 
-Do not claim that the live board replay passed until step 6 has actually run and
-`verdict.json` says `PASS`. Acceptance includes the expected phase order,
-nonzero deployment, host lag at or below 100 ms, no more than 2% skipped samples,
-fresh status throughout, zero decoder/error-counter increases, and a final
-retracted/de-energized actuator status. `XACTUAL` is still internal driver state,
-not encoder proof that the mechanism physically followed it.
+Do not claim that a hardware replay passed until the continuous supervisor has
+actually run and the per-run `verdict.json` says `PASS`. Endurance acceptance
+requires the separately documented 100-cycle qualification with independent
+observation and zero thermal, driver, protocol, or evidence failures.
+`XACTUAL` is still internal driver state, not encoder or endstop proof that the
+mechanism physically followed it.
 
 ## Mechanical assumptions used for display only
 
@@ -236,8 +233,8 @@ With the prototype step conversion, the intended display values are:
 | 75% | 2.25 | 115,200 |
 | 100% | 3.00 | 153,600 |
 
-The presentation firmware now commands these counts, but that does not prove
-they equal the mechanism's safe physical travel. Verify motor steps/rev,
+The HIL forced-motion path commands these counts, but that does not prove they
+equal the mechanism's safe physical travel. Verify motor steps/rev,
 microstepping, gearing, lead-screw pitch, usable travel, home reference, end
 stops, and required current before coupling a loaded mechanism.
 

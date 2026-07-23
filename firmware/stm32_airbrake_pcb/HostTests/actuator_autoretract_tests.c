@@ -7,6 +7,7 @@
 
 #include "ambar_actuator.h"
 #include "main.h"
+#include "rocket_protocol.h"
 #include "tmc5240.h"
 
 #include <stdbool.h>
@@ -102,6 +103,15 @@ HAL_StatusTypeDef TMC5240_ReadActualPosition(int32_t *position_steps)
     return s_position_read_status;
 }
 
+HAL_StatusTypeDef TMC5240_ReadTargetPosition(int32_t *position_steps)
+{
+    if (s_position_read_status == HAL_OK && position_steps != NULL)
+    {
+        *position_steps = s_target_steps;
+    }
+    return s_position_read_status;
+}
+
 HAL_StatusTypeDef TMC5240_ReadDriverStatus(uint32_t *driver_status)
 {
     if (s_driver_status_read_status == HAL_OK && driver_status != NULL)
@@ -162,6 +172,7 @@ static bool ready_actuator(AmbarActuatorState_t *state)
 
     s_enable_calls = 0U;
     s_target_write_calls = 0U;
+    s_stop_calls = 0U;
     return true;
 }
 
@@ -307,7 +318,6 @@ static bool test_retract_stall_times_out_and_latches_fault(void)
     AmbarActuatorState_t state;
     const AmbarFlightOutput_t recovery = recovery_output();
     AmbarActuatorDecision_t decision;
-
     CHECK(ready_actuator(&state));
     CHECK(start_automatic_deployment(&state, 1.0f));
     s_actual_steps = 10000;
@@ -330,7 +340,6 @@ static bool test_retract_total_timeout_wins_even_with_progress(void)
     AmbarActuatorState_t state;
     const AmbarFlightOutput_t recovery = recovery_output();
     AmbarActuatorDecision_t decision;
-
     CHECK(ready_actuator(&state));
     CHECK(start_automatic_deployment(&state, 1.0f));
     s_actual_steps = 10000;
@@ -423,6 +432,59 @@ static bool test_driver_fault_during_retract_removes_energy(void)
     return true;
 }
 
+static bool test_automatic_profile_rejects_hil_override(void)
+{
+    AmbarActuatorState_t state;
+
+    CHECK(ready_actuator(&state));
+    CHECK(!AmbarActuator_SetHilOverride(
+        &state, AMBAR_ACTUATOR_HIL_OVERRIDE_FORCE_FULL));
+    CHECK(!s_driver_enabled);
+    CHECK(state.hil_override_mode == AMBAR_ACTUATOR_HIL_OVERRIDE_OFF);
+    CHECK((state.last_inhibit_flags
+           & AMBAR_ACTUATOR_INHIBIT_HIL_PROFILE) != 0U);
+    return true;
+}
+
+static bool test_automatic_profile_rejects_known_full_recovery(void)
+{
+    AmbarActuatorState_t state;
+
+    CHECK(ready_actuator(&state));
+    CHECK(!AmbarActuator_RequestKnownFullRecoveryRetract(&state));
+    CHECK(!s_driver_enabled);
+    CHECK((state.last_inhibit_flags
+           & AMBAR_ACTUATOR_INHIBIT_HIL_PROFILE) != 0U);
+    return true;
+}
+
+static bool test_fraction_mapping_and_profile_identity(void)
+{
+    AmbarActuatorState_t state;
+    const AmbarFlightOutput_t output = flight_output(
+        0.5f,
+        false,
+        AMBAR_INHIBIT_NONE,
+        AMBAR_PHASE_AIRBRAKE_ACTIVE);
+    const uint16_t expected_profile =
+#if AMBAR_BUILD_IS_VARIABLE_HIL
+        ROCKET_ACTUATOR_STATUS_VARIABLE_HIL;
+#else
+        0U;
+#endif
+
+    CHECK(ready_actuator(&state));
+    const AmbarActuatorDecision_t decision = AmbarActuator_Task(&state, &output);
+    CHECK(decision.driver_enabled);
+    CHECK(decision.target_position_steps == 5000);
+    CHECK(s_target_steps == 5000);
+    CHECK((AmbarActuator_GetProtocolStatus(&state)
+           & ROCKET_ACTUATOR_STATUS_VARIABLE_HIL) == expected_profile);
+    CHECK((AmbarActuator_GetProtocolStatus(&state)
+           & ROCKET_ACTUATOR_STATUS_CONTINUOUS_HIL) == 0U);
+    return true;
+}
+
 int main(void)
 {
     static const struct
@@ -438,6 +500,10 @@ int main(void)
         {"no startup/zero-command motion", test_startup_and_zero_command_have_no_unintended_motion},
         {"energy-off stop clears permission", test_energy_off_stop_clears_automatic_permission},
         {"driver fault during retract is energy-off", test_driver_fault_during_retract_removes_energy},
+        {"automatic profile rejects HIL override", test_automatic_profile_rejects_hil_override},
+        {"automatic profile rejects known-FULL recovery",
+         test_automatic_profile_rejects_known_full_recovery},
+        {"fraction mapping and profile identity", test_fraction_mapping_and_profile_identity},
     };
     uint32_t passed = 0U;
 

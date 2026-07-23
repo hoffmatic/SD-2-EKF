@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>AMBAR Continuous HIL Dashboard</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">AMBAR · RocketPy hardware-in-the-loop</p>
+      <h1>Continuous test console</h1>
+      <p class="subtitle">Live flight-model, STM32-controller, and commanded actuator-ramp evidence</p>
+    </div>
+    <div class="connection" id="connection-status" data-state="waiting">
+      <span aria-hidden="true"></span>
+      <strong>Connecting</strong>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero-grid" aria-label="Session status">
+      <article class="metric-card status-card">
+        <span>Session state</span>
+        <strong id="session-state">Waiting</strong>
+        <small id="session-id">No session database yet</small>
+      </article>
+      <article class="metric-card">
+        <span>Completed</span>
+        <strong id="completed-count">0</strong>
+        <small id="pass-fail-count">0 pass · 0 fail</small>
+      </article>
+      <article class="metric-card">
+        <span>Current run</span>
+        <strong id="current-run">—</strong>
+        <small id="current-mode">Waiting for preflight</small>
+      </article>
+      <article class="metric-card fault-card">
+        <span>Latest fault</span>
+        <strong id="latest-fault">None</strong>
+        <small>Any fault stops the continuous session</small>
+      </article>
+      <article class="metric-card">
+        <span>Retracted dwell</span>
+        <strong id="dwell-remaining">0.0 s</strong>
+        <small id="dwell-config">Configured 30.0 s</small>
+      </article>
+      <article class="metric-card">
+        <span>Latest data</span>
+        <strong id="sample-count">0 samples</strong>
+        <small id="freshness">Waiting for SQLite/UDP</small>
+      </article>
+      <article class="metric-card">
+        <span>Packet lag</span>
+        <strong id="packet-lag">—</strong>
+        <small>Latest host replay schedule lag</small>
+      </article>
+      <article class="metric-card">
+        <span>Skipped samples</span>
+        <strong id="skipped-samples">0</strong>
+        <small>Cumulative skipped host samples in this run</small>
+      </article>
+      <article class="metric-card">
+        <span>RocketPy/SIL truth apogee</span>
+        <strong id="current-truth-apogee">Pending</strong>
+        <small id="current-truth-apogee-note">Final simulated apogee is pending</small>
+      </article>
+      <article class="metric-card">
+        <span>RocketPy target-band pass</span>
+        <strong id="sil-target-band-count">0/0</strong>
+        <small id="sil-target-band-note">RocketPy/SIL truth inside 3,000 +/-100 ft</small>
+      </article>
+      <article class="metric-card">
+        <span>Actuator feedback</span>
+        <strong id="feedback-age">&mdash;</strong>
+        <small id="feedback-source">No correlated feedback yet</small>
+      </article>
+      <article class="metric-card">
+        <span>Target reachability</span>
+        <strong id="target-reachability">&mdash;</strong>
+        <small>Closed/full predictor bracket at the latest causal tick</small>
+      </article>
+      <article class="metric-card">
+        <span>Controller configuration</span>
+        <strong id="configuration-crc">&mdash;</strong>
+        <small>Must match the full versioned board readback before arming</small>
+      </article>
+      <article class="metric-card">
+        <span>Hardware safety verdict</span>
+        <strong id="hardware-safety-verdict">Pending</strong>
+        <small>Protocol, actuator tracking, cleanup, HOME, and driver-off checks</small>
+      </article>
+      <article class="metric-card">
+        <span>3,000 ft performance verdict</span>
+        <strong id="performance-verdict">Pending</strong>
+        <small>RocketPy truth is evaluated separately from hardware safety</small>
+      </article>
+    </section>
+
+    <section class="scope-strip" aria-label="Evidence channel definitions">
+      <div><i class="key truth"></i><strong id="physics-channel-title">RocketPy/SIL physics</strong><span id="physics-channel-note">precomputed trajectory truth</span></div>
+      <div><i class="key controller"></i><strong>STM32 controller request</strong><span>production estimator and bounded fractional command</span></div>
+      <div><i class="key target"></i><strong id="target-channel-title">Forced HIL actuator command</strong><span id="target-channel-note">0 to full to HOME in TMC ramp counts</span></div>
+      <div id="feedback-channel"><i class="key feedback"></i><strong>TMC XACTUAL feedback</strong><span>driver ramp state applied to the next physics interval</span></div>
+    </section>
+
+    <section class="warning-panel" id="warning-panel">
+      <strong>Measurement boundary</strong>
+      <p id="measurement-warning">Software HOME/FULL, target, and TMC XACTUAL are internal driver ramp-state evidence. There are no endpoint switches or independent encoder measurements.</p>
+      <p id="causality-warning">The forced physical HIL stroke does not feed back into the precomputed trajectory. Only the virtual SIL deployment used while RocketPy generated the case changes truth dynamics.</p>
+    </section>
+
+    <section class="section-heading">
+      <div>
+        <p class="eyebrow">Current replay</p>
+        <h2>Flight and actuator traces</h2>
+      </div>
+      <span id="run-status-chip" class="status-chip">Waiting</span>
+    </section>
+
+    <section class="chart-grid">
+      <article class="chart-card wide">
+        <header><div><h3>Altitude</h3><p>RocketPy truth against the STM32 EKF estimate</p></div><span>ft AGL</span></header>
+        <div class="legend"><span class="solid blue">RocketPy truth</span><span class="dashed orange">STM32 estimate</span></div>
+        <div class="chart-stage"><canvas id="altitude-chart"></canvas><p class="chart-empty">Waiting for at least 8 samples</p></div>
+      </article>
+      <article class="chart-card">
+        <header><div><h3>Vertical velocity</h3><p>Truth and STM32 estimate</p></div><span>ft/s</span></header>
+        <div class="legend"><span class="solid blue">RocketPy truth</span><span class="dashed orange">STM32 estimate</span></div>
+        <div class="chart-stage"><canvas id="velocity-chart"></canvas><p class="chart-empty">Waiting for at least 8 samples</p></div>
+      </article>
+      <article class="chart-card">
+        <header><div><h3>Apogee prediction</h3><p>STM32 prediction against mission target</p></div><span>ft AGL</span></header>
+        <div class="legend"><span class="dashed orange">STM32 predicted</span><span class="dashed green">Closed prediction</span><span class="dashed red">Full prediction</span><span class="dotted gold">Target</span></div>
+        <div class="chart-stage"><canvas id="apogee-chart"></canvas><p class="chart-empty">Waiting for at least 8 samples</p></div>
+      </article>
+      <article class="chart-card">
+        <header><div><h3 id="deployment-title">Deployment demand</h3><p id="deployment-note">Raw controller request remains separate from forced motion</p></div><span>%</span></header>
+        <div class="legend"><span id="deployment-legend-controller" class="dashed blue">Raw STM32 controller</span><span id="deployment-legend-target" class="solid gold">Applied HIL override</span><span id="deployment-legend-feedback" class="dashed orange">TMC XACTUAL feedback</span><span id="deployment-legend-physics" class="solid green">Physics applied</span></div>
+        <div class="chart-stage"><canvas id="deployment-chart"></canvas><p class="chart-empty">Waiting for at least 8 samples</p></div>
+      </article>
+      <article class="chart-card">
+        <header><div><h3>Actuator ramp state</h3><p>Target versus TMC XACTUAL; neither is an encoder reading</p></div><span>motor rotations</span></header>
+        <div class="legend"><span class="solid blue">Target</span><span class="dashed orange">TMC XACTUAL</span></div>
+        <div class="chart-stage"><canvas id="actuator-chart"></canvas><p class="chart-empty">Waiting for at least 8 samples</p></div>
+      </article>
+      <article class="chart-card wide">
+        <header><div><h3>Software geometry, phase, and fault timeline</h3><p>HOME means XACTUAL≈0; FULL means XACTUAL≈153600, not physical endstop evidence</p></div><span>state</span></header>
+        <div class="chart-stage timeline-stage"><canvas id="timeline-chart"></canvas><p class="chart-empty">Waiting for samples</p></div>
+      </article>
+    </section>
+
+    <section class="section-heading lower">
+      <div>
+        <p class="eyebrow">Campaign flight outcome</p>
+        <h2>RocketPy/SIL truth apogee</h2>
+      </div>
+    </section>
+
+    <section class="campaign-metrics" aria-label="RocketPy campaign apogee summary">
+      <article class="metric-card">
+        <span>Mean final truth apogee</span>
+        <strong id="campaign-apogee-mean">N/A</strong>
+        <small>Mean of finalized RocketPy/SIL truth maxima</small>
+      </article>
+      <article class="metric-card">
+        <span>Final truth range</span>
+        <strong id="campaign-apogee-range">N/A</strong>
+        <small>Minimum to maximum across finalized runs</small>
+      </article>
+      <article class="metric-card">
+        <span>Mean error vs 3,000 ft</span>
+        <strong id="campaign-target-error">N/A</strong>
+        <small>Signed RocketPy/SIL truth error; positive is high</small>
+      </article>
+      <article class="metric-card">
+        <span>Final apogees included</span>
+        <strong id="campaign-apogee-count">0 runs</strong>
+        <small>Hardware HIL pass is reported separately above</small>
+      </article>
+    </section>
+
+    <section class="chart-grid campaign-grid">
+      <article class="chart-card wide">
+        <header><div><h3>Campaign RocketPy/SIL altitude</h3><p>Every loaded run truth trace, finalized-run mean, and the 3,000 ft mission target</p></div><span>ft AGL</span></header>
+        <div class="legend"><span class="thin blue">Per-run RocketPy truth</span><span class="solid blue strong-line">Finalized-run mean</span><span class="dotted gold">3,000 ft target</span></div>
+        <div class="chart-stage campaign-stage"><canvas id="campaign-altitude-chart"></canvas><p class="chart-empty">Waiting for RocketPy truth traces</p></div>
+      </article>
+    </section>
+
+    <section class="section-heading lower">
+      <div>
+        <p class="eyebrow">Session trends</p>
+        <h2>Stroke timing and repeatability</h2>
+      </div>
+    </section>
+
+    <section class="chart-grid trend-grid">
+      <article class="chart-card">
+        <header><div><h3>Open and close command time</h3><p>Completed target/XACTUAL ramp sequences by cycle</p></div><span>s</span></header>
+        <div class="legend"><span class="solid blue">Open</span><span class="dashed orange">Close</span></div>
+        <div class="chart-stage"><canvas id="stroke-chart"></canvas><p class="chart-empty">Waiting for completed runs</p></div>
+      </article>
+      <article class="chart-card">
+        <header><div><h3>Maximum tracking error</h3><p>Target minus TMC ramp state; not encoder error</p></div><span>rotations</span></header>
+        <div class="legend"><span class="solid gold">Maximum tracking error</span></div>
+        <div class="chart-stage"><canvas id="tracking-chart"></canvas><p class="chart-empty">Waiting for completed runs</p></div>
+      </article>
+    </section>
+
+    <section class="table-card">
+      <header>
+        <div><p class="eyebrow">Evidence index</p><h2>Recent runs</h2></div>
+        <span>Newest first</span>
+      </header>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Cycle</th>
+              <th>Mode</th>
+              <th>Hardware run</th>
+              <th>Hardware HIL</th>
+              <th>RocketPy final apogee</th>
+              <th>Target band</th>
+              <th>Open</th>
+              <th>Close</th>
+              <th>Max ramp error</th>
+              <th>Failure</th>
+            </tr>
+          </thead>
+          <tbody id="recent-runs">
+            <tr><td colspan="10" class="empty-cell">No finalized runs yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span>Source: read-only campaign.sqlite3 plus best-effort localhost event fan-out</span>
+    <span id="generated-at">Not yet refreshed</span>
+  </footer>
+</body>
+</html>

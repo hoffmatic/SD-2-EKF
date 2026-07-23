@@ -34,13 +34,17 @@ class ActuatorCheckoutTests(unittest.TestCase):
     class _FakeClock:
         def __init__(self) -> None:
             self.now_s = 0.0
+            self.sleep_calls: list[float] = []
 
         def monotonic(self) -> float:
             return self.now_s
 
+        def now(self) -> float:
+            return self.now_s
+
         def sleep(self, seconds: float) -> None:
-            # Keep timeout-path tests bounded without changing successful waits.
-            self.now_s += max(1.0, seconds)
+            self.sleep_calls.append(seconds)
+            self.now_s += seconds
 
     class _FakeCheckoutPort:
         def __init__(
@@ -49,12 +53,24 @@ class ActuatorCheckoutTests(unittest.TestCase):
             *,
             direction_inverted: bool = False,
             fault_on_move: bool = False,
+            geometry_after_home: bool = True,
+            geometry_after_move: bool = True,
+            geometry_failure_move_index: int | None = None,
+            geometry_failure_poll_after_move: int | None = None,
         ) -> None:
             self.monitor = monitor
             self.fault_on_move = fault_on_move
+            self.geometry_after_home = geometry_after_home
+            self.geometry_after_move = geometry_after_move
+            self.geometry_failure_move_index = geometry_failure_move_index
+            self.geometry_failure_poll_after_move = geometry_failure_poll_after_move
             self.decoder = protocol.StreamDecoder()
             self.commands: list[int] = []
             self.move_targets: list[int] = []
+            self.polls_since_move: int | None = None
+            self.current_machine_state = 1
+            self.current_target_steps = 0
+            self.current_actual_steps = 0
             self.current_flags = (
                 replay.ACTUATOR_FLAG_BUILD_ENABLED
                 | replay.ACTUATOR_FLAG_BENCH_ENABLED
@@ -83,6 +99,18 @@ class ActuatorCheckoutTests(unittest.TestCase):
             return None
 
         def read(self, _size: int) -> bytes:
+            if self.polls_since_move is not None:
+                self.polls_since_move += 1
+                if (
+                    self.geometry_failure_poll_after_move
+                    == self.polls_since_move
+                ):
+                    self.geometry_after_home = False
+                self._publish_actuator(
+                    machine_state=self.current_machine_state,
+                    target_steps=self.current_target_steps,
+                    actual_steps=self.current_actual_steps,
+                )
             return b""
 
         def _publish_actuator(
@@ -92,11 +120,35 @@ class ActuatorCheckoutTests(unittest.TestCase):
             target_steps: int = 0,
             actual_steps: int = 0,
         ) -> None:
+            self.current_machine_state = machine_state
+            self.current_target_steps = target_steps
+            self.current_actual_steps = actual_steps
+            reserved = replay.ACTUATOR_STATUS_CONTINUOUS_HIL_PROFILE
+            if (
+                (self.current_flags & replay.ACTUATOR_FLAG_HOMED) != 0
+                and self.geometry_after_home
+            ):
+                reserved |= replay.ACTUATOR_STATUS_LIMITS_PLAUSIBLE
+            if (
+                (self.current_flags & replay.ACTUATOR_FLAG_HOMED) != 0
+                and target_steps == 0
+                and actual_steps == 0
+            ):
+                reserved |= replay.ACTUATOR_STATUS_HOME_ACTIVE
             self.monitor.actuator = {
                 "flags": self.current_flags,
                 "machine_state": machine_state,
                 "target_steps": target_steps,
                 "actual_steps": actual_steps,
+                "driver_status": 0,
+                "reserved": reserved,
+                "home_active": bool(
+                    reserved & replay.ACTUATOR_STATUS_HOME_ACTIVE
+                ),
+                "full_active": False,
+                "limits_plausible": bool(
+                    reserved & replay.ACTUATOR_STATUS_LIMITS_PLAUSIBLE
+                ),
             }
             self.monitor.actuator_count += 1
 
@@ -130,6 +182,7 @@ class ActuatorCheckoutTests(unittest.TestCase):
             elif command == protocol.CMD_BENCH_MOVE_STEPS:
                 target_steps = struct.unpack("<i", command_data)[0]
                 self.move_targets.append(target_steps)
+                self.polls_since_move = 0
                 if self.fault_on_move:
                     self.current_flags |= replay.ACTUATOR_FLAG_ESTOP
                     self._publish_actuator(
@@ -137,6 +190,11 @@ class ActuatorCheckoutTests(unittest.TestCase):
                         target_steps=target_steps,
                     )
                 else:
+                    if (
+                        not self.geometry_after_move
+                        or self.geometry_failure_move_index == len(self.move_targets)
+                    ):
+                        self.geometry_after_home = False
                     self.current_flags &= ~(
                         replay.ACTUATOR_FLAG_DRIVER_ENABLED
                         | replay.ACTUATOR_FLAG_MANUAL_PENDING
@@ -147,6 +205,7 @@ class ActuatorCheckoutTests(unittest.TestCase):
                         actual_steps=target_steps,
                     )
             elif command == protocol.CMD_RETRACT:
+                self.polls_since_move = None
                 self.current_flags &= ~(
                     replay.ACTUATOR_FLAG_DRIVER_ENABLED
                     | replay.ACTUATOR_FLAG_MANUAL_PENDING
@@ -171,8 +230,18 @@ class ActuatorCheckoutTests(unittest.TestCase):
             result = checkout.main()
         return result, run_checkout, error.getvalue()
 
-    def _run_fake_checkout(self, port: _FakeCheckoutPort, *, percent: float = 2.0) -> None:
+    def _run_fake_checkout(
+        self,
+        port: _FakeCheckoutPort,
+        *,
+        percent: float = 2.0,
+        stage_percent: float | None = None,
+        stage_count: int | None = None,
+        inter_stage_dwell_s: float = 0.0,
+        outbound_hold_s: float = 0.0,
+    ) -> _FakeClock:
         clock = self._FakeClock()
+        port.monitor.clock = clock
 
         class FakeSerialModule:
             @staticmethod
@@ -190,7 +259,15 @@ class ActuatorCheckoutTests(unittest.TestCase):
             mock.patch.object(checkout.time, "sleep", side_effect=clock.sleep),
             redirect_stdout(io.StringIO()),
         ):
-            checkout.run_checkout(port_name="COM_TEST", percent=percent)
+            checkout.run_checkout(
+                port_name="COM_TEST",
+                percent=percent,
+                stage_percent=stage_percent,
+                stage_count=stage_count,
+                inter_stage_dwell_s=inter_stage_dwell_s,
+                outbound_hold_s=outbound_hold_s,
+            )
+        return clock
 
     # -----------------------------------------------------------------------
     # Operator-gate, success-path, and fault-cleanup regressions
@@ -214,7 +291,14 @@ class ActuatorCheckoutTests(unittest.TestCase):
             "--home-at-current-position",
         )
         self.assertEqual(result, 0)
-        run_checkout.assert_called_once_with(port_name=None, percent=2.0)
+        run_checkout.assert_called_once_with(
+            port_name=None,
+            percent=2.0,
+            stage_percent=None,
+            stage_count=None,
+            inter_stage_dwell_s=0.0,
+            outbound_hold_s=0.0,
+        )
         self.assertEqual(error, "")
 
     def test_cli_requires_separate_acknowledgement_above_ten_percent(self) -> None:
@@ -235,8 +319,32 @@ class ActuatorCheckoutTests(unittest.TestCase):
             "--allow-more-than-10-percent",
         )
         self.assertEqual(result, 0)
-        run_checkout.assert_called_once_with(port_name=None, percent=10.01)
+        run_checkout.assert_called_once_with(
+            port_name=None,
+            percent=10.01,
+            stage_percent=None,
+            stage_count=None,
+            inter_stage_dwell_s=0.0,
+            outbound_hold_s=0.0,
+        )
         self.assertEqual(error, "")
+
+    def test_cli_validates_staging_and_timing_before_opening_serial(self) -> None:
+        required = ("--allow-actuator-motion", "--home-at-current-position")
+        invalid_argument_sets = (
+            ("--stage-percent", "1", "--stage-count", "2"),
+            ("--stage-percent", "0.01"),
+            ("--stage-count", "0"),
+            ("--stage-count", "2", "--inter-stage-dwell-s", "0.01"),
+            ("--inter-stage-dwell-s", "0.5"),
+            ("--outbound-hold-s", "0.01"),
+            ("--outbound-hold-s", "61"),
+        )
+        for arguments in invalid_argument_sets:
+            with self.subTest(arguments=arguments):
+                result, run_checkout, _error = self._invoke_main(*required, *arguments)
+                self.assertEqual(result, 2)
+                run_checkout.assert_not_called()
 
     def test_direction_bit_controls_sign_and_success_command_order(self) -> None:
         expected_commands = [
@@ -266,6 +374,97 @@ class ActuatorCheckoutTests(unittest.TestCase):
                 self.assertEqual(port.move_targets, [expected_target])
                 self.assertEqual(port.commands, expected_commands)
 
+    def test_stages_both_directions_holds_and_finishes_with_retract(self) -> None:
+        monitor = replay.PacketMonitor()
+        port = self._FakeCheckoutPort(monitor)
+
+        clock = self._run_fake_checkout(
+            port,
+            percent=4.0,
+            stage_count=4,
+            inter_stage_dwell_s=0.25,
+            outbound_hold_s=2.0,
+        )
+
+        one_percent = round(checkout.PRESENTATION_FULL_TRAVEL_STEPS / 100.0)
+        self.assertEqual(
+            port.move_targets,
+            [
+                one_percent,
+                one_percent * 2,
+                one_percent * 3,
+                one_percent * 4,
+                one_percent * 3,
+                one_percent * 2,
+                one_percent,
+            ],
+        )
+        self.assertEqual(port.commands[-1], protocol.CMD_RETRACT)
+        self.assertAlmostEqual(sum(clock.sleep_calls), 3.5)
+
+    def test_stage_percent_uses_signed_targets_and_exact_endpoint(self) -> None:
+        monitor = replay.PacketMonitor()
+        port = self._FakeCheckoutPort(monitor, direction_inverted=True)
+
+        self._run_fake_checkout(
+            port,
+            percent=3.5,
+            stage_percent=1.0,
+        )
+
+        one_percent = round(checkout.PRESENTATION_FULL_TRAVEL_STEPS / 100.0)
+        final_target = -round(checkout.PRESENTATION_FULL_TRAVEL_STEPS * 3.5 / 100.0)
+        self.assertEqual(
+            port.move_targets,
+            [-one_percent, -2 * one_percent, -3 * one_percent, final_target,
+             -3 * one_percent, -2 * one_percent, -one_percent],
+        )
+
+    def test_return_stage_geometry_failure_never_blindly_retracts(self) -> None:
+        monitor = replay.PacketMonitor()
+        port = self._FakeCheckoutPort(
+            monitor,
+            geometry_failure_move_index=3,
+        )
+
+        with self.assertRaisesRegex(
+            replay.ReplayError,
+            "geometry is not plausible",
+        ):
+            self._run_fake_checkout(port, percent=4.0, stage_count=2)
+
+        self.assertEqual(len(port.move_targets), 3)
+        self.assertNotIn(protocol.CMD_RETRACT, port.commands)
+        self.assertEqual(
+            port.commands[-2:],
+            [protocol.CMD_SET_ARMED, protocol.CMD_SIM_STOP],
+        )
+
+    def test_geometry_failure_during_dwell_prevents_the_next_target(self) -> None:
+        monitor = replay.PacketMonitor()
+        port = self._FakeCheckoutPort(
+            monitor,
+            geometry_failure_poll_after_move=3,
+        )
+
+        with self.assertRaisesRegex(
+            replay.ReplayError,
+            "unsafe actuator state while waiting between outbound stages",
+        ):
+            self._run_fake_checkout(
+                port,
+                percent=4.0,
+                stage_count=2,
+                inter_stage_dwell_s=0.25,
+            )
+
+        self.assertEqual(len(port.move_targets), 1)
+        self.assertNotIn(protocol.CMD_RETRACT, port.commands)
+        self.assertEqual(
+            port.commands[-2:],
+            [protocol.CMD_SET_ARMED, protocol.CMD_SIM_STOP],
+        )
+
     def test_fault_cleanup_disarms_and_stops_without_blind_retract(self) -> None:
         monitor = replay.PacketMonitor()
         port = self._FakeCheckoutPort(monitor, fault_on_move=True)
@@ -291,6 +490,46 @@ class ActuatorCheckoutTests(unittest.TestCase):
             [protocol.CMD_SET_ARMED, protocol.CMD_SIM_STOP],
         )
         self.assertNotIn(protocol.CMD_RETRACT, port.commands)
+
+    def test_missing_geometry_after_home_aborts_before_motion(self) -> None:
+        monitor = replay.PacketMonitor()
+        port = self._FakeCheckoutPort(
+            monitor,
+            geometry_after_home=False,
+        )
+
+        with self.assertRaisesRegex(
+            replay.ReplayError,
+            "geometry is not plausible",
+        ):
+            self._run_fake_checkout(port)
+
+        self.assertNotIn(protocol.CMD_BENCH_MOVE_STEPS, port.commands)
+        self.assertNotIn(protocol.CMD_RETRACT, port.commands)
+        self.assertEqual(
+            port.commands[-2:],
+            [protocol.CMD_SET_ARMED, protocol.CMD_SIM_STOP],
+        )
+
+    def test_missing_geometry_after_move_aborts_without_blind_retract(self) -> None:
+        monitor = replay.PacketMonitor()
+        port = self._FakeCheckoutPort(
+            monitor,
+            geometry_after_move=False,
+        )
+
+        with self.assertRaisesRegex(
+            replay.ReplayError,
+            "geometry is not plausible",
+        ):
+            self._run_fake_checkout(port)
+
+        self.assertIn(protocol.CMD_BENCH_MOVE_STEPS, port.commands)
+        self.assertNotIn(protocol.CMD_RETRACT, port.commands)
+        self.assertEqual(
+            port.commands[-2:],
+            [protocol.CMD_SET_ARMED, protocol.CMD_SIM_STOP],
+        )
 
 
 if __name__ == "__main__":

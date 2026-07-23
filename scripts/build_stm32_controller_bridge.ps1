@@ -55,7 +55,14 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "STM32 controller bridge build failed."
     }
-    $compilerVersion = (& $compilerPath --version | Select-Object -First 1)
+    # Let the native process finish before selecting its first output line.
+    # Piping it directly into Select-Object -First can close the pipe early and
+    # leave LASTEXITCODE at -1 even though the compiler and bridge build passed.
+    $compilerVersionOutput = @(& $compilerPath --version)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to read the STM32 controller bridge compiler version."
+    }
+    $compilerVersion = $compilerVersionOutput | Select-Object -First 1
     $buildMetadata = [System.IO.Path]::ChangeExtension($bridge, ".build.txt")
     @(
         "compiler=$compilerPath"

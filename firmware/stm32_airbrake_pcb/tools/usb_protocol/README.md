@@ -10,7 +10,11 @@ codec intended for the presentation GUI.
 
 ## Quick USB test on Windows
 
-1. Flash the current `Debug/stm32_airbrake_pcb.elf` from CubeIDE.
+1. Flash `Normal/ambar_normal.elf`,
+   `Continuous_HIL/ambar_continuous_hil.elf`, or
+   `Variable_HIL/ambar_variable_hil.elf` from CubeIDE. The Desktop
+   build-and-flash launchers also verify the connected board reports the
+   requested profile after programming.
 2. Connect a data-capable USB cable to the PCB's own USB-C connector.
 3. Select Python and install the one host dependency. Start with the system
    interpreter; the commented fallback selects the bundled Codex runtime used
@@ -33,16 +37,17 @@ The probe sends `PING` and `REQUEST_SNAPSHOT`.  A working link returns binary
 ACK, telemetry, and actuator-status packets.  The COM number is assigned by
 Windows and may differ between computers.
 
-## Presentation simulation sequence
+## Finite USB replay compatibility
 
-For the supplied OpenRocket flight and a guarded, operator-ready replay, follow
+For the supplied OpenRocket flight and a finite replay, follow
 [OPENROCKET_SIMULATION.md](OPENROCKET_SIMULATION.md). The accompanying
 `replay_openrocket.py` defaults to a read-only dry run and uniformly resamples
-the trajectory. A motion-inhibited firmware requires no motion override;
-physical replay requires the presentation feature plus
-`--allow-actuator-motion --home-at-current-position`. Motion mode is locked to
-the firmware's reviewed 3-rotation/153600-count travel profile and prints the
-configured extension direction. Because the current export contains Total rather than Vertical
+the trajectory. Live simulation input is accepted only by the two HIL profiles.
+A finite `--no-arm` replay is data-only: it exercises
+USB, replay, estimation, phases, and controller output without energizing the
+motor. The full commanded 0 -> 153600 -> 0 ramp-state sequence is owned by the continuous
+supervisor, which labels raw controller demand and forced actuator demand
+separately. Because the historical export contains Total rather than Vertical
 velocity/acceleration, its provisional live replay also requires the explicit
 `--allow-derived-vertical` acknowledgement.
 
@@ -74,7 +79,7 @@ epoch as `packet_time_ms` from the STM32.
 
 For a durable rehearsal record, add `--run-bundle DIR`. The directory contains
 `manifest.json`, the ordered `packets.jsonl` transcript, and `verdict.json`.
-The verdict requires the phase sequence, deployment, final HOME/driver-off
+The verdict requires the phase sequence, deployment, final software-HOME/driver-off
 state where applicable, clean protocol counters, at most 100 ms host lag, and
 no more than 2% skipped source samples. Scheduling uses the high-resolution
 `time.perf_counter()` clock; STM32 packet time remains a separate time domain.
@@ -87,21 +92,26 @@ no more than 2% skipped source samples. Scheduling uses the high-resolution
 3. Send `SET_ARMED` with value `1` only after the simulation stream is stable.
 4. Read 20 Hz telemetry. `deployment_percent` is the intended flight response;
    actuator-status separately explains whether hardware movement is inhibited.
-5. After a real automatic deployment, healthy/armed on-target, descent, or
-   recovery output may command one bounded return to HOME. Explicit DISARM,
-   `SIM_STOP`, a 500 ms sample timeout, USB loss, ESTOP, or a fault instead
-   cancels motion and removes energy.
+5. In `CONTINUOUS_HIL`, `deployment_percent` remains telemetry-only and only
+   `ROCKET_CMD_HIL_SET_OVERRIDE` may energize motion. In `VARIABLE_HIL`, forced
+   override is unsupported and the normal fractional controller output drives
+   the guarded actuator target.
 
-The current requested demo copy has `AMBAR_FEATURE_PRESENTATION_MOTION=1`; the
-actuator and bench switches inherit that value. Startup remains unhomed and
-energy-off. Set the one presentation switch to `0`, rebuild, and reflash for a
-motion-inhibited build. All switches are centralized in
-`Core/Inc/ambar_features.h`.
+`AMBAR_BUILD_PROFILE_NORMAL` is the default and rejects simulation, HIL
+override, HOME/retract, and arbitrary bench-motion commands. The separately
+flashable `AMBAR_BUILD_PROFILE_CONTINUOUS_HIL` image enables USB replay,
+software-zero geometry, guarded bench checkout, and HIL override. The separate
+`AMBAR_BUILD_PROFILE_VARIABLE_HIL` image enables causal 50 Hz
+simulation and fractional actuation but rejects forced override and arbitrary
+bench moves. Reflashing is the authoritative mode boundary; there is no runtime
+profile switch.
 
-Before a full synthetic flight, use `actuator_checkout.py` for a two-percent
-direction/travel check. It requires the same double acknowledgement, moves to a
-bounded absolute target, stops, retracts, and verifies the driver is off. See
-`OPENROCKET_SIMULATION.md` for the physical setup and exact commands.
+Before continuous testing, manually place the mechanism fully closed and use
+`actuator_checkout.py` for a two-percent direction/travel check.
+`--home-at-current-position` explicitly authorizes firmware to declare the
+current TMC ramp position as software zero without seeking or motion. The
+checkout moves to a bounded target, returns to zero, and verifies driver-off.
+There is no endpoint switch or independent encoder.
 
 ## GUI command reference
 
@@ -120,13 +130,15 @@ rejected.
 | `0x10` | `uint16` target in 0.1 m | Set target apogee; valid wire range is 10.0-6553.5 m; rejected while armed |
 | `0x11` | `uint8`, 0 or 1 | Disarm/arm; simulation requires a valid sample before arming |
 | `0x15` | none | Emergency stop and disarm |
-| `0x16` | none | Declare current bench position HOME; feature-gated and rejected while armed |
+| `0x16` | none | Declare the operator-confirmed fully closed current TMC ramp position as software HOME (`XACTUAL=0`); no seek/motion; HIL-only and rejected while armed |
 | `0x17` | none | Request retract; feature-gated and rejected while armed |
 | `0x18` | none | Re-capture physical pad reference; rejected while armed or simulating |
 | `0x19` | none | Save config; USB flash-maintenance feature-gated and off by default |
 | `0x1A` | `int32` absolute steps | Bench move; feature/range-gated and rejected while armed |
 | `0x20` | none | Start simulation, disarm, and reset estimator |
 | `0x21` | none | Stop simulation, disarm, and reset estimator |
+| `0x22` | `uint8` (`0` OFF, `1` FORCE_FULL, `2` FORCE_HOME) | `CONTINUOUS_HIL`-only forced demand; always unsupported by `VARIABLE_HIL` |
+| `0x23` | none | `VARIABLE_HIL` full versioned controller-config readback |
 | `0x30` | none | Start flash logging |
 | `0x31` | none | Stop flash logging |
 | `0x32` | none | Erase log; USB flash-maintenance feature-gated and off by default |
@@ -142,3 +154,12 @@ actuator-status, and heartbeat packets. A simulation payload is exactly
 barometer_stddev_cm:u16>`. Normal samples must mark both altitude and
 acceleration valid. Each altitude observation is applied to the EKF once;
 acceleration is held between incoming samples.
+
+`VARIABLE_HIL` adds packet type `0x21` for the atomic 52-byte host config
+upload, type `0x05` for its full CRC-bearing readback, and type `0x04` for the
+44-byte sequence-correlated board state. A valid upload ACK uses command identity
+`0x24`; a readback request alone never satisfies the arm gate. The state packet
+header and payload both echo the accepted simulation sequence; config-readback
+headers echo the upload or GET request sequence. The state packet reports
+controller fraction, motor target, and TMC5240 `XACTUAL` separately.
+Feedback source `1` means ramp-state only, never an encoder.

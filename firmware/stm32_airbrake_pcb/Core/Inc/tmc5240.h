@@ -120,6 +120,8 @@ HAL_StatusTypeDef TMC5240_SetActualPosition(int32_t position_steps);
 HAL_StatusTypeDef TMC5240_SetTargetPosition(int32_t target_steps);
 /** Read the internal ramp position; this is not independent shaft feedback. */
 HAL_StatusTypeDef TMC5240_ReadActualPosition(int32_t *position_steps);
+/** Read the current absolute ramp target used by guarded recovery preflight. */
+HAL_StatusTypeDef TMC5240_ReadTargetPosition(int32_t *position_steps);
 /** Read raw DRV_STATUS for fault interpretation by the actuator layer. */
 HAL_StatusTypeDef TMC5240_ReadDriverStatus(uint32_t *driver_status);
 /** Return nonzero when any status bit in HARD_FAULT_MASK is active. */

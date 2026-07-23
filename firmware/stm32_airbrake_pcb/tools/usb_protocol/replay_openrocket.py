@@ -38,10 +38,20 @@ import re
 import secrets
 import struct
 import sys
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from rocket_protocol import (
     ACK_OK,
+    ACTUATOR_STATUS_CONTINUOUS_HIL_PROFILE,
+    ACTUATOR_STATUS_FULL_ACTIVE,
+    ACTUATOR_STATUS_GEOMETRY_PLAUSIBLE,
+    ACTUATOR_STATUS_HOME_ACTIVE,
+    ACTUATOR_STATUS_HIL_OVERRIDE_ACTIVE,
+    ACTUATOR_STATUS_LIMITS_PLAUSIBLE,
+    ACTUATOR_STATUS_SOFTWARE_FULL_ACTIVE,
+    ACTUATOR_STATUS_SOFTWARE_HOME_ACTIVE,
+    ACTUATOR_STATUS_STROKE_SEQUENCE_VERIFIED,
+    CMD_HIL_SET_OVERRIDE,
     CMD_HOME,
     CMD_PING,
     CMD_RETRACT,
@@ -50,6 +60,9 @@ from rocket_protocol import (
     CMD_SET_TARGET_APOGEE,
     CMD_SIM_START,
     CMD_SIM_STOP,
+    HIL_OVERRIDE_FORCE_FULL,
+    HIL_OVERRIDE_FORCE_HOME,
+    HIL_OVERRIDE_OFF,
     PKT_ACK,
     PKT_ACTUATOR_STATUS,
     PKT_COMMAND,
@@ -76,7 +89,9 @@ FEATURE_ACTUATOR = 1 << 3
 FEATURE_BENCH_COMMANDS = 1 << 4
 FEATURE_USB_PROTOCOL = 1 << 10
 FEATURE_SIMULATION = 1 << 11
-FEATURE_PRESENTATION_MOTION = 1 << 14
+FEATURE_CONTINUOUS_HIL = 1 << 14
+# Compatibility alias for the finite presentation replay workflow.
+FEATURE_PRESENTATION_MOTION = FEATURE_CONTINUOUS_HIL
 FEATURE_DIRECTION_INVERTED = 1 << 15
 
 PRESENTATION_FULL_TRAVEL_STEPS = 3 * 200 * 256
@@ -95,6 +110,16 @@ TELEMETRY_FLAG_SIMULATION_ACTIVE = 1 << 15
 ACTUATOR_STATE_FAULT = 6
 ACTUATOR_STATE_ESTOP = 7
 ACTUATOR_POSITION_TOLERANCE_STEPS = 100
+MAX_HOST_SCHEDULE_LAG_S = 0.100
+
+TMC_DRV_STATUS_S2GB = 0x10000000
+TMC_DRV_STATUS_S2GA = 0x08000000
+TMC_DRV_STATUS_OTPW = 0x04000000
+TMC_DRV_STATUS_OT = 0x02000000
+TMC_DRV_STATUS_S2VSB = 0x00002000
+TMC_DRV_STATUS_S2VSA = 0x00001000
+TMC_DRV_STATUS_STOP_MASK = 0x1E003000
+TMC_DRV_STATUS_THERMAL_MASK = TMC_DRV_STATUS_OTPW | TMC_DRV_STATUS_OT
 
 PHASE_NAMES = {
     0: "PAD_IDLE",
@@ -128,6 +153,17 @@ def _shareable_project_path(path: str | Path) -> str:
 
 class ReplayError(RuntimeError):
     """Raised when the input or live board state is unsafe for replay."""
+
+
+class ReplayDeadlineError(ReplayError):
+    """Replay fault that preserves the measured over-limit scheduling lag."""
+
+    def __init__(self, lag_s: float) -> None:
+        self.lag_s = float(lag_s)
+        super().__init__(
+            "host missed a replay deadline by "
+            f"{self.lag_s * 1000.0:.1f} ms"
+        )
 
 
 @dataclass(frozen=True)
@@ -188,6 +224,20 @@ class ReplayProfile:
     uses_derived_vertical: bool
     source_max_gap_s: float
     warnings: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ReplayDeadlineResult:
+    """One sample's host-scheduling result.
+
+    ``rebase_s`` is nonzero only for continuous HIL.  It shifts all later
+    deadlines by the tolerated delay so every input row is sent without a
+    catch-up burst.
+    """
+
+    lag_s: float
+    skip: bool
+    rebase_s: float
 
 
 # ---------------------------------------------------------------------------
@@ -821,9 +871,18 @@ def _choose_port(list_ports, requested: str | None) -> str:
 
     if requested:
         return requested
+    matches = []
     for port in list_ports.comports():
         if port.vid == AMBAR_USB_VID and port.pid == AMBAR_USB_PID:
-            return port.device
+            matches.append(port)
+    if len(matches) == 1:
+        return str(matches[0].device)
+    if len(matches) > 1:
+        devices = ", ".join(str(port.device) for port in matches)
+        raise ReplayError(
+            "multiple AMBAR USB devices were found "
+            f"({devices}); pass --port COMx explicitly"
+        )
     raise ReplayError("AMBAR USB device 0483:5740 was not found; pass --port COMx")
 
 
@@ -917,7 +976,7 @@ class PacketMonitor:
         self.decoder = StreamDecoder()
         self.acks: dict[int, dict[str, int]] = {}
         self.telemetry: dict[str, int | float] | None = None
-        self.actuator: dict[str, int] | None = None
+        self.actuator: dict[str, int | bool] | None = None
         self.heartbeat: dict[str, int] | None = None
         self.initial_heartbeat: dict[str, int] | None = None
         self.events: list[dict[str, int]] = []
@@ -932,6 +991,8 @@ class PacketMonitor:
         self.actuator_count = 0
         self.telemetry_received_s: float | None = None
         self.actuator_received_s: float | None = None
+        self.telemetry_packet_time_ms: int | None = None
+        self.actuator_packet_time_ms: int | None = None
 
     def begin_replay_metrics(self) -> None:
         """Exclude preflight state from flight-phase and motion extrema.
@@ -964,6 +1025,7 @@ class PacketMonitor:
                 self.telemetry = telemetry
                 self.telemetry_count += 1
                 self.telemetry_received_s = self.clock.now()
+                self.telemetry_packet_time_ms = packet.time_ms
                 phase = int(telemetry["state"])
                 if not self.phase_order or self.phase_order[-1] != phase:
                     self.phase_order.append(phase)
@@ -982,6 +1044,7 @@ class PacketMonitor:
                 self.actuator = actuator
                 self.actuator_count += 1
                 self.actuator_received_s = self.clock.now()
+                self.actuator_packet_time_ms = packet.time_ms
                 target = int(actuator["target_steps"])
                 actual = int(actuator["actual_steps"])
                 self.max_abs_actuator_target_steps = max(
@@ -1089,6 +1152,37 @@ def _wait_for_ack(
     raise ReplayError(f"timeout waiting for command 0x{command:02X} ACK")
 
 
+def _set_hil_override(
+    port,
+    monitor: PacketMonitor,
+    sequence: SequenceCounter,
+    mode: int,
+    *,
+    observer: ReplayRunObserver,
+    timeout_s: float = 0.25,
+) -> None:
+    """Set one firmware-gated HIL override and require its explicit ACK."""
+
+    command_sequence = _send_command(
+        port,
+        sequence,
+        CMD_HIL_SET_OVERRIDE,
+        bytes((mode,)),
+    )
+    observer.emit(
+        "hil_override_command",
+        mode=mode,
+        command_sequence=command_sequence,
+    )
+    _wait_for_ack(
+        port,
+        monitor,
+        command_sequence,
+        CMD_HIL_SET_OVERRIDE,
+        timeout_s=timeout_s,
+    )
+
+
 def _collect_preflight_status(port, monitor: PacketMonitor, seconds: float = 1.25) -> None:
     """Collect heartbeat and actuator status without mixing device/host time."""
 
@@ -1101,27 +1195,39 @@ def _collect_preflight_status(port, monitor: PacketMonitor, seconds: float = 1.2
 
 
 def _enforce_no_motion(monitor: PacketMonitor) -> None:
-    """Require simulation support while rejecting every physical-motion feature."""
+    """Require the new HIL image while proving all physical demand is inactive."""
 
     if monitor.heartbeat is None or monitor.actuator is None:
         raise ReplayError("did not receive heartbeat and actuator status during preflight")
-    features = monitor.heartbeat["feature_flags"]
-    required = FEATURE_USB_PROTOCOL | FEATURE_SIMULATION
+    features = int(monitor.heartbeat["feature_flags"])
+    required = FEATURE_USB_PROTOCOL | FEATURE_SIMULATION | FEATURE_CONTINUOUS_HIL
     if (features & required) != required:
-        raise ReplayError(f"USB/simulation feature bits are not both enabled: 0x{features:08X}")
-    if features & (FEATURE_ACTUATOR | FEATURE_BENCH_COMMANDS):
-        raise ReplayError("refusing replay because actuator motion features are enabled")
-    flags = monitor.actuator["flags"]
+        raise ReplayError(
+            "no-motion live replay requires the USB, simulation, and "
+            f"CONTINUOUS_HIL feature bits: 0x{features:08X}"
+        )
+    flags = int(monitor.actuator["flags"])
     if flags & (
-        ACTUATOR_FLAG_BUILD_ENABLED
-        | ACTUATOR_FLAG_BENCH_ENABLED
-        | ACTUATOR_FLAG_DRIVER_ENABLED
+        ACTUATOR_FLAG_DRIVER_ENABLED
+        | ACTUATOR_FLAG_MANUAL_PENDING
+        | ACTUATOR_FLAG_ESTOP
     ):
-        raise ReplayError(f"refusing replay because actuator status enables motion: 0x{flags:02X}")
+        raise ReplayError(
+            f"refusing no-motion replay because actuator demand is active: 0x{flags:02X}"
+        )
+    reserved = int(monitor.actuator.get("reserved", 0))
+    if not reserved & ACTUATOR_STATUS_CONTINUOUS_HIL_PROFILE:
+        raise ReplayError("actuator status does not identify the CONTINUOUS_HIL image")
+    if reserved & ACTUATOR_STATUS_HIL_OVERRIDE_ACTIVE:
+        raise ReplayError("refusing no-motion replay while HIL override is active")
 
 
-def _enforce_actuator_motion(monitor: PacketMonitor) -> None:
-    """Require the dedicated presentation build and an energy-off pre-HOME state."""
+def _enforce_actuator_motion(
+    monitor: PacketMonitor,
+    *,
+    require_geometry: bool = True,
+) -> None:
+    """Require the motion build, energy off, and optionally declared geometry."""
     if monitor.heartbeat is None or monitor.actuator is None:
         raise ReplayError("did not receive heartbeat and actuator status during preflight")
 
@@ -1150,7 +1256,8 @@ def _enforce_actuator_motion(monitor: PacketMonitor) -> None:
     missing_flags = required_flags & ~flags
     if missing_flags:
         raise ReplayError(
-            f"actuator is not ready for HOME; missing status flags 0x{missing_flags:02X}"
+            "actuator is not ready for software HOME declaration; "
+            f"missing status flags 0x{missing_flags:02X}"
         )
 
     unsafe_flags = (
@@ -1167,6 +1274,21 @@ def _enforce_actuator_motion(monitor: PacketMonitor) -> None:
         ACTUATOR_STATE_ESTOP,
     ):
         raise ReplayError(f"actuator reports fault state: {monitor.actuator}")
+    reserved = int(monitor.actuator.get("reserved", 0))
+    if not reserved & ACTUATOR_STATUS_CONTINUOUS_HIL_PROFILE:
+        raise ReplayError("actuator status does not identify the CONTINUOUS_HIL image")
+    if (
+        require_geometry
+        and not reserved & ACTUATOR_STATUS_GEOMETRY_PLAUSIBLE
+    ):
+        raise ReplayError("software actuator geometry is not plausible")
+    if (
+        reserved & ACTUATOR_STATUS_SOFTWARE_HOME_ACTIVE
+        and reserved & ACTUATOR_STATUS_SOFTWARE_FULL_ACTIVE
+    ):
+        raise ReplayError(
+            "software HOME and software FULL cannot both be active"
+        )
 
 
 def _actuator_ready_for_flight(monitor: PacketMonitor) -> bool:
@@ -1177,8 +1299,12 @@ def _actuator_ready_for_flight(monitor: PacketMonitor) -> bool:
     except ReplayError:
         return False
     assert monitor.actuator is not None
+    reserved = int(monitor.actuator.get("reserved", 0))
     return (
         (int(monitor.actuator["flags"]) & ACTUATOR_FLAG_HOMED) != 0
+        and (reserved & ACTUATOR_STATUS_SOFTWARE_HOME_ACTIVE) != 0
+        and (reserved & ACTUATOR_STATUS_SOFTWARE_FULL_ACTIVE) == 0
+        and (reserved & ACTUATOR_STATUS_GEOMETRY_PLAUSIBLE) != 0
         and abs(
             int(monitor.actuator.get("target_steps", 0))
             - int(monitor.actuator.get("actual_steps", 0))
@@ -1186,7 +1312,102 @@ def _actuator_ready_for_flight(monitor: PacketMonitor) -> bool:
     )
 
 
-def _assert_motion_runtime_healthy(monitor: PacketMonitor) -> None:
+def _enforce_continuous_hil(
+    monitor: PacketMonitor,
+    *,
+    require_geometry: bool = True,
+) -> None:
+    """Require the HIL image, energy off, and optionally declared geometry."""
+
+    if monitor.heartbeat is None or monitor.actuator is None:
+        raise ReplayError("did not receive heartbeat and actuator status during preflight")
+    features = int(monitor.heartbeat["feature_flags"])
+    required_features = (
+        FEATURE_USB_PROTOCOL
+        | FEATURE_SIMULATION
+        | FEATURE_ACTUATOR
+        | FEATURE_CONTINUOUS_HIL
+    )
+    missing_features = required_features & ~features
+    if missing_features:
+        raise ReplayError(
+            "continuous HIL requires the USB, simulation, actuator, and HIL "
+            f"profile bits; missing 0x{missing_features:08X}"
+        )
+
+    status = monitor.actuator
+    flags = int(status["flags"])
+    required_flags = (
+        ACTUATOR_FLAG_BUILD_ENABLED
+        | ACTUATOR_FLAG_DRIVER_OK
+        | ACTUATOR_FLAG_CONFIG_VALID
+    )
+    missing_flags = required_flags & ~flags
+    if missing_flags:
+        raise ReplayError(
+            f"continuous-HIL actuator preflight is missing flags 0x{missing_flags:02X}"
+        )
+    if flags & (
+        ACTUATOR_FLAG_DRIVER_ENABLED
+        | ACTUATOR_FLAG_ESTOP
+        | ACTUATOR_FLAG_MANUAL_PENDING
+    ):
+        raise ReplayError(
+            f"continuous-HIL actuator is not energy-off and idle: 0x{flags:02X}"
+        )
+    if int(status.get("machine_state", 0)) in (
+        ACTUATOR_STATE_FAULT,
+        ACTUATOR_STATE_ESTOP,
+    ):
+        raise ReplayError(f"actuator reports fault state: {status}")
+    if int(status.get("driver_status", 0)) & TMC_DRV_STATUS_STOP_MASK:
+        raise ReplayError(
+            "TMC5240 reports a short/thermal warning: "
+            f"0x{int(status['driver_status']):08X}"
+        )
+    reserved = int(status.get("reserved", 0))
+    if not reserved & ACTUATOR_STATUS_CONTINUOUS_HIL_PROFILE:
+        raise ReplayError("actuator status does not identify the CONTINUOUS_HIL image")
+    if (
+        require_geometry
+        and not reserved & ACTUATOR_STATUS_GEOMETRY_PLAUSIBLE
+    ):
+        raise ReplayError("software actuator geometry is not plausible")
+    if (
+        reserved & ACTUATOR_STATUS_SOFTWARE_HOME_ACTIVE
+        and reserved & ACTUATOR_STATUS_SOFTWARE_FULL_ACTIVE
+    ):
+        raise ReplayError(
+            "software HOME and software FULL cannot both be active"
+        )
+
+
+def _continuous_hil_ready_for_flight(monitor: PacketMonitor) -> bool:
+    """Return whether the declared software zero remains ready and energy-off."""
+
+    try:
+        _enforce_continuous_hil(monitor)
+    except ReplayError:
+        return False
+    assert monitor.actuator is not None
+    status = monitor.actuator
+    reserved = int(status.get("reserved", 0))
+    return (
+        (int(status["flags"]) & ACTUATOR_FLAG_HOMED) != 0
+        and (reserved & ACTUATOR_STATUS_SOFTWARE_HOME_ACTIVE) != 0
+        and (reserved & ACTUATOR_STATUS_SOFTWARE_FULL_ACTIVE) == 0
+        and abs(int(status.get("target_steps", 0)))
+        <= ACTUATOR_POSITION_TOLERANCE_STEPS
+        and abs(int(status.get("actual_steps", 0)))
+        <= ACTUATOR_POSITION_TOLERANCE_STEPS
+    )
+
+
+def _assert_motion_runtime_healthy(
+    monitor: PacketMonitor,
+    *,
+    continuous_hil: bool = False,
+) -> None:
     """Reject stale status or a newly unsafe actuator state during motion."""
 
     if monitor.actuator is None:
@@ -1205,11 +1426,12 @@ def _assert_motion_runtime_healthy(monitor: PacketMonitor) -> None:
     flags = int(monitor.actuator["flags"])
     required = (
         ACTUATOR_FLAG_BUILD_ENABLED
-        | ACTUATOR_FLAG_BENCH_ENABLED
         | ACTUATOR_FLAG_HOMED
         | ACTUATOR_FLAG_DRIVER_OK
         | ACTUATOR_FLAG_CONFIG_VALID
     )
+    if not continuous_hil:
+        required |= ACTUATOR_FLAG_BENCH_ENABLED
     if (flags & required) != required:
         raise ReplayError(f"actuator readiness changed during replay: 0x{flags:02X}")
     if flags & (ACTUATOR_FLAG_ESTOP | ACTUATOR_FLAG_MANUAL_PENDING):
@@ -1219,6 +1441,25 @@ def _assert_motion_runtime_healthy(monitor: PacketMonitor) -> None:
         ACTUATOR_STATE_ESTOP,
     ):
         raise ReplayError(f"actuator faulted during replay: {monitor.actuator}")
+    driver_status = int(monitor.actuator.get("driver_status", 0))
+    if driver_status & TMC_DRV_STATUS_STOP_MASK:
+        raise ReplayError(
+            "TMC5240 short/thermal status during replay: "
+            f"0x{driver_status:08X}"
+        )
+    if continuous_hil:
+        reserved = int(monitor.actuator.get("reserved", 0))
+        if not reserved & ACTUATOR_STATUS_CONTINUOUS_HIL_PROFILE:
+            raise ReplayError("continuous-HIL build identity disappeared")
+        if not reserved & ACTUATOR_STATUS_GEOMETRY_PLAUSIBLE:
+            raise ReplayError("software actuator geometry became implausible")
+        if (
+            reserved & ACTUATOR_STATUS_SOFTWARE_HOME_ACTIVE
+            and reserved & ACTUATOR_STATUS_SOFTWARE_FULL_ACTIVE
+        ):
+            raise ReplayError(
+                "software HOME and software FULL became active together"
+            )
 
 
 def _wait_for_actuator(
@@ -1247,6 +1488,300 @@ def _wait_for_actuator(
                 return status
         monitor.clock.sleep(0.005)
     raise ReplayError(f"timeout waiting for actuator to {description}")
+
+
+class HilStrokeTracker:
+    """Deterministic 0 -> 153600 -> 0 software-geometry state machine.
+
+    The tracker intentionally keeps the STM32 controller's deployment request
+    separate from the forced motor override. It observes XACTUAL only as
+    TMC5240 ramp-generator state. The software HOME/FULL status bits are
+    firmware-derived geometry flags, not switch, encoder, or independent
+    evidence that the mechanism physically followed these counts.
+    """
+
+    def __init__(
+        self,
+        *,
+        burn_time_s: float,
+        post_burn_margin_s: float = 0.1,
+        full_hold_s: float = 8.0,
+        endpoint_timeout_s: float = 8.0,
+        full_travel_steps: int = PRESENTATION_FULL_TRAVEL_STEPS,
+        position_tolerance_steps: int = ACTUATOR_POSITION_TOLERANCE_STEPS,
+    ) -> None:
+        if burn_time_s < 0.0:
+            raise ValueError("burn time must be nonnegative")
+        if post_burn_margin_s < 0.0:
+            raise ValueError("post-burn margin must be nonnegative")
+        if full_hold_s <= 0.0 or endpoint_timeout_s <= 0.0:
+            raise ValueError("HIL stroke timeouts must be positive")
+        self.burn_time_s = burn_time_s
+        self.post_burn_margin_s = post_burn_margin_s
+        self.full_hold_s = full_hold_s
+        self.endpoint_timeout_s = endpoint_timeout_s
+        self.full_travel_steps = full_travel_steps
+        self.position_tolerance_steps = position_tolerance_steps
+        self.state = "WAITING_FOR_COAST"
+        self.raw_controller_was_active = False
+        self.full_command_host_s: float | None = None
+        self.full_reached_host_s: float | None = None
+        self.home_command_host_s: float | None = None
+        self.home_reached_host_s: float | None = None
+        self.full_status: dict[str, Any] | None = None
+        self.home_status: dict[str, Any] | None = None
+
+    @property
+    def complete(self) -> bool:
+        return self.state == "COMPLETE"
+
+    @property
+    def override_mode(self) -> int:
+        if self.state in ("MOVING_FULL", "AT_FULL"):
+            return HIL_OVERRIDE_FORCE_FULL
+        if self.state == "MOVING_HOME":
+            return HIL_OVERRIDE_FORCE_HOME
+        return HIL_OVERRIDE_OFF
+
+    def _at_full(self, status: Mapping[str, Any]) -> bool:
+        reserved = int(status.get("reserved", 0))
+        return (
+            (reserved & ACTUATOR_STATUS_SOFTWARE_FULL_ACTIVE) != 0
+            and (reserved & ACTUATOR_STATUS_SOFTWARE_HOME_ACTIVE) == 0
+            and abs(
+                abs(int(status.get("target_steps", 0)))
+                - self.full_travel_steps
+            )
+            <= self.position_tolerance_steps
+            and abs(
+                abs(int(status.get("actual_steps", 0)))
+                - self.full_travel_steps
+            )
+            <= self.position_tolerance_steps
+        )
+
+    def _at_home(self, status: Mapping[str, Any]) -> bool:
+        reserved = int(status.get("reserved", 0))
+        return (
+            (reserved & ACTUATOR_STATUS_SOFTWARE_HOME_ACTIVE) != 0
+            and (reserved & ACTUATOR_STATUS_SOFTWARE_FULL_ACTIVE) == 0
+            and (reserved & ACTUATOR_STATUS_STROKE_SEQUENCE_VERIFIED) != 0
+            and abs(int(status.get("target_steps", 0)))
+            <= self.position_tolerance_steps
+            and abs(int(status.get("actual_steps", 0)))
+            <= self.position_tolerance_steps
+        )
+
+    def observe(
+        self,
+        *,
+        source_time_s: float,
+        telemetry: Mapping[str, Any] | None,
+        actuator: Mapping[str, Any] | None,
+        host_now_s: float,
+    ) -> int | None:
+        """Advance from fresh board status and return a newly requested mode."""
+
+        if telemetry is not None:
+            raw_percent = int(telemetry.get("deployment_percent", 0))
+            if raw_percent > 0:
+                self.raw_controller_was_active = True
+            phase = int(telemetry.get("state", -1))
+        else:
+            raw_percent = 0
+            phase = -1
+
+        if self.state == "WAITING_FOR_COAST":
+            if (
+                source_time_s >= self.burn_time_s + self.post_burn_margin_s
+                and phase in (2, 3)
+            ):
+                self.state = "MOVING_FULL"
+                self.full_command_host_s = host_now_s
+                return HIL_OVERRIDE_FORCE_FULL
+            return None
+
+        if self.state == "MOVING_FULL":
+            assert self.full_command_host_s is not None
+            if actuator is not None and self._at_full(actuator):
+                self.state = "AT_FULL"
+                self.full_reached_host_s = host_now_s
+                self.full_status = dict(actuator)
+                return None
+            if host_now_s - self.full_command_host_s > self.endpoint_timeout_s:
+                raise ReplayError(
+                    "software FULL/XACTUAL target was not reached before "
+                    "the travel timeout"
+                )
+            return None
+
+        if self.state == "AT_FULL":
+            assert self.full_reached_host_s is not None
+            recovery = phase == 4
+            raw_retracted = self.raw_controller_was_active and raw_percent == 0
+            hold_expired = (
+                host_now_s - self.full_reached_host_s >= self.full_hold_s
+            )
+            if recovery or raw_retracted or hold_expired:
+                self.state = "MOVING_HOME"
+                self.home_command_host_s = host_now_s
+                return HIL_OVERRIDE_FORCE_HOME
+            return None
+
+        if self.state == "MOVING_HOME":
+            assert self.home_command_host_s is not None
+            if actuator is not None and self._at_home(actuator):
+                self.state = "COMPLETE"
+                self.home_reached_host_s = host_now_s
+                self.home_status = dict(actuator)
+                return None
+            if host_now_s - self.home_command_host_s > self.endpoint_timeout_s:
+                raise ReplayError(
+                    "software HOME/XACTUAL zero was not reached before "
+                    "the travel timeout"
+                )
+            return None
+
+        return None
+
+    def require_home(self, host_now_s: float) -> int | None:
+        """Request HOME at the replay boundary or reject an incomplete stroke."""
+
+        if self.state == "AT_FULL":
+            self.state = "MOVING_HOME"
+            self.home_command_host_s = host_now_s
+            return HIL_OVERRIDE_FORCE_HOME
+        if self.state in ("MOVING_FULL", "MOVING_HOME") or self.complete:
+            return None
+        raise ReplayError(
+            "trajectory ended before software FULL/XACTUAL was observed"
+        )
+
+    def metrics(self) -> dict[str, Any]:
+        open_time = (
+            self.full_reached_host_s - self.full_command_host_s
+            if self.full_reached_host_s is not None
+            and self.full_command_host_s is not None
+            else None
+        )
+        close_time = (
+            self.home_reached_host_s - self.home_command_host_s
+            if self.home_reached_host_s is not None
+            and self.home_command_host_s is not None
+            else None
+        )
+        return {
+            "stroke_state": self.state,
+            "full_command_host_s": self.full_command_host_s,
+            "full_reached_host_s": self.full_reached_host_s,
+            "home_command_host_s": self.home_command_host_s,
+            "home_reached_host_s": self.home_reached_host_s,
+            "open_time_s": open_time,
+            "close_time_s": close_time,
+            "raw_controller_was_active": self.raw_controller_was_active,
+            "full_status": self.full_status,
+            "home_status": self.home_status,
+        }
+
+
+def _emit_sample_observed(
+    observer: ReplayRunObserver,
+    *,
+    sample_index: int,
+    sample: ReplaySample,
+    schedule_lag_s: float,
+    monitor: PacketMonitor,
+    hil_stroke: HilStrokeTracker | None,
+    metadata: Mapping[str, Any] | None,
+    skipped_host_samples: int,
+) -> None:
+    """Publish one chart-ready row without conflating controller and override."""
+
+    telemetry = dict(monitor.telemetry or {})
+    actuator = dict(monitor.actuator or {})
+    sil = dict(metadata or {})
+    override_mode = (
+        hil_stroke.override_mode if hil_stroke is not None else HIL_OVERRIDE_OFF
+    )
+    forced_fraction: float | None
+    if override_mode == HIL_OVERRIDE_FORCE_FULL:
+        forced_fraction = 1.0
+    elif override_mode == HIL_OVERRIDE_FORCE_HOME:
+        forced_fraction = 0.0
+    else:
+        forced_fraction = None
+    target_steps = (
+        int(actuator["target_steps"]) if "target_steps" in actuator else None
+    )
+    actual_steps = (
+        int(actuator["actual_steps"]) if "actual_steps" in actuator else None
+    )
+    observer.emit(
+        "sample_observed",
+        sample_index=sample_index,
+        replay_time_s=sample.replay_time_s,
+        source_time_s=sample.source_time_s,
+        schedule_lag_s=schedule_lag_s,
+        skipped_host_samples=skipped_host_samples,
+        truth_altitude_m=sample.altitude_m,
+        truth_velocity_mps=sample.vertical_velocity_mps,
+        truth_acceleration_mps2=sample.vertical_acceleration_mps2,
+        sil=sil,
+        stm32_altitude_m=telemetry.get("altitude_m"),
+        stm32_velocity_mps=telemetry.get("velocity_mps"),
+        stm32_predicted_apogee_m=telemetry.get("predicted_apogee_m"),
+        target_apogee_m=telemetry.get("target_apogee_m"),
+        raw_controller_deployment_fraction=(
+            float(telemetry["deployment_percent"]) / 100.0
+            if "deployment_percent" in telemetry
+            else None
+        ),
+        forced_hil_deployment_fraction=forced_fraction,
+        hil_override_mode=override_mode,
+        motor_target_steps=target_steps,
+        motor_actual_steps=actual_steps,
+        motor_tracking_error_steps=(
+            target_steps - actual_steps
+            if target_steps is not None and actual_steps is not None
+            else None
+        ),
+        software_home_active=actuator.get(
+            "software_home_active",
+            actuator.get("home_active"),
+        ),
+        software_full_active=actuator.get(
+            "software_full_active",
+            actuator.get("full_active"),
+        ),
+        geometry_plausible=actuator.get(
+            "geometry_plausible",
+            actuator.get("limits_plausible"),
+        ),
+        stroke_sequence_verified=actuator.get(
+            "stroke_sequence_verified",
+            actuator.get("endpoint_sequence_verified"),
+        ),
+        # Keep the protocol-v2 evidence column names for existing databases.
+        home_active=actuator.get("home_active"),
+        full_active=actuator.get("full_active"),
+        limits_plausible=actuator.get("limits_plausible"),
+        endpoint_sequence_verified=actuator.get(
+            "endpoint_sequence_verified"
+        ),
+        stm32_phase=telemetry.get("state"),
+        stm32_phase_name=PHASE_NAMES.get(
+            int(telemetry["state"])
+            if "state" in telemetry
+            else -1,
+            "UNKNOWN",
+        ),
+        actuator_machine_state=actuator.get("machine_state"),
+        actuator_flags=actuator.get("flags"),
+        actuator_inhibit_flags=actuator.get("actuator_inhibit_flags"),
+        driver_status=actuator.get("driver_status"),
+        telemetry_packet_time_ms=monitor.telemetry_packet_time_ms,
+        actuator_packet_time_ms=monitor.actuator_packet_time_ms,
+    )
 
 
 def _print_progress(
@@ -1313,6 +1848,51 @@ PRESENTATION_PHASE_ORDER = (0, 1, 2, 3, 4)
 MAX_HOST_SKIP_RATIO = 0.02
 
 
+def _wait_for_replay_deadline(
+    clock: HostClock,
+    poll: Callable[[], None],
+    *,
+    start_s: float,
+    replay_time_s: float,
+    rate_hz: float,
+    continuous_hil: bool,
+) -> ReplayDeadlineResult:
+    """Wait for one sample and classify a bounded host scheduling miss.
+
+    Finite SIL replay preserves its absolute timeline by skipping a row that
+    is more than half a period late. Continuous HIL must never skip a row, so
+    a tolerated miss instead rebases later deadlines by the complete lag. This
+    preserves nominal spacing after the interruption and prevents a catch-up
+    USB burst. Both modes still fail closed above the 100 ms deadline ceiling.
+    """
+
+    deadline = start_s + replay_time_s
+    now = clock.now()
+    while now < deadline:
+        poll()
+        now = clock.now()
+        if now < deadline:
+            clock.sleep(min(0.002, deadline - now))
+            now = clock.now()
+
+    lag = now - deadline
+    if lag > MAX_HOST_SCHEDULE_LAG_S:
+        raise ReplayDeadlineError(lag)
+
+    late_skip_threshold_s = 0.5 / rate_hz
+    if continuous_hil:
+        return ReplayDeadlineResult(
+            lag_s=lag,
+            skip=False,
+            rebase_s=lag if lag > late_skip_threshold_s else 0.0,
+        )
+    return ReplayDeadlineResult(
+        lag_s=lag,
+        skip=lag > late_skip_threshold_s,
+        rebase_s=0.0,
+    )
+
+
 def _contains_ordered(values: Sequence[int], required: Sequence[int]) -> bool:
     """Return true when every required value appears in order without rewinding."""
 
@@ -1350,6 +1930,140 @@ def _acceptance_check(
     return result
 
 
+def _actuator_energy_is_off(status: Mapping[str, Any]) -> bool:
+    """Return true only for explicit driver-off and HIL-override-off evidence."""
+
+    return (
+        int(status.get("flags", 0)) & ACTUATOR_FLAG_DRIVER_ENABLED
+    ) == 0 and (
+        int(status.get("reserved", 0))
+        & ACTUATOR_STATUS_HIL_OVERRIDE_ACTIVE
+    ) == 0
+
+
+def _perform_safety_cleanup(
+    port,
+    monitor: PacketMonitor,
+    sequence: SequenceCounter,
+    observer: ReplayRunObserver,
+    clock: HostClock,
+    *,
+    continuous_hil: bool,
+    timeout_s: float = 1.5,
+) -> dict[str, Any]:
+    """Stop in place and collect fresh post-cleanup state without retracting.
+
+    Evidence callbacks are deliberately best effort in this path: a disk or
+    dashboard failure must not prevent the override-off, DISARM, and SIM_STOP
+    writes. A fresh actuator packet is required before motor energy is reported
+    as verified off.
+    """
+
+    commands: list[tuple[int, bytes]] = []
+    if continuous_hil:
+        commands.append(
+            (CMD_HIL_SET_OVERRIDE, bytes((HIL_OVERRIDE_OFF,)))
+        )
+    commands.extend(
+        (
+            (CMD_SET_ARMED, b"\x00"),
+            (CMD_SIM_STOP, b""),
+        )
+    )
+    before_count = monitor.actuator_count
+    before_actuator = (
+        dict(monitor.actuator) if monitor.actuator is not None else None
+    )
+    command_results: list[dict[str, Any]] = []
+    observation_errors: list[dict[str, str]] = []
+
+    try:
+        observer.emit(
+            "safety_cleanup",
+            commands=[command for command, _data in commands],
+            retract_attempted=False,
+        )
+    except Exception as error:
+        observation_errors.append(
+            {
+                "stage": "cleanup_start_event",
+                "type": type(error).__name__,
+                "message": str(error),
+            }
+        )
+
+    for command, data in commands:
+        result: dict[str, Any] = {
+            "command": command,
+            "sequence": None,
+            "write_completed": False,
+            "acknowledged": False,
+        }
+        try:
+            command_sequence = _send_command(
+                port,
+                sequence,
+                command,
+                data,
+                clock=clock,
+            )
+            result["sequence"] = command_sequence
+            result["write_completed"] = True
+        except Exception as error:
+            result["error_type"] = type(error).__name__
+            result["error"] = str(error)
+        command_results.append(result)
+
+    post_cleanup_actuator: dict[str, Any] | None = None
+    poll_error: dict[str, str] | None = None
+    deadline = clock.now() + timeout_s
+    while clock.now() < deadline:
+        try:
+            monitor.poll(port)
+        except Exception as error:
+            poll_error = {
+                "type": type(error).__name__,
+                "message": str(error),
+            }
+        if monitor.actuator_count > before_count and monitor.actuator is not None:
+            candidate = dict(monitor.actuator)
+            if _actuator_energy_is_off(candidate):
+                post_cleanup_actuator = candidate
+                break
+        clock.sleep(0.005)
+
+    for result in command_results:
+        command_sequence = result.get("sequence")
+        if command_sequence is None:
+            continue
+        ack = monitor.acks.get(int(command_sequence))
+        result["acknowledged"] = bool(
+            ack is not None
+            and int(ack.get("command", -1)) == int(result["command"])
+            and int(ack.get("result", -1)) == ACK_OK
+        )
+
+    cleanup = {
+        "attempted": True,
+        "retract_attempted": False,
+        "policy": "stop_in_place_no_automatic_home_after_fault",
+        "pre_cleanup_actuator": before_actuator,
+        "fresh_actuator_status_received": post_cleanup_actuator is not None,
+        "motor_energy_off_verified": post_cleanup_actuator is not None,
+        "post_cleanup_actuator": post_cleanup_actuator,
+        "command_results": command_results,
+        "poll_error": poll_error,
+        "observation_errors": observation_errors,
+    }
+    try:
+        observer.emit("safety_cleanup_result", **cleanup)
+    except Exception:
+        # Safety writes and the in-memory cleanup result already exist. The
+        # original evidence-write failure is allowed to propagate later.
+        pass
+    return cleanup
+
+
 def _build_live_verdict(
     monitor: PacketMonitor,
     *,
@@ -1360,6 +2074,9 @@ def _build_live_verdict(
     max_schedule_lag_s: float,
     skipped_host_samples: int,
     sent_host_samples: int,
+    continuous_hil: bool = False,
+    hil_stroke: HilStrokeTracker | None = None,
+    safety_cleanup: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Evaluate the presentation checks and preserve the evidence behind each.
 
@@ -1383,7 +2100,20 @@ def _build_live_verdict(
         receive_error_delta = None
         transmit_drop_delta = None
 
-    final_actuator = dict(monitor.actuator) if monitor.actuator is not None else None
+    cleanup_attempted = bool(
+        safety_cleanup is not None and safety_cleanup.get("attempted")
+    )
+    if cleanup_attempted:
+        cleanup_actuator = safety_cleanup.get("post_cleanup_actuator")
+        final_actuator = (
+            dict(cleanup_actuator)
+            if isinstance(cleanup_actuator, Mapping)
+            else None
+        )
+    else:
+        final_actuator = (
+            dict(monitor.actuator) if monitor.actuator is not None else None
+        )
     final_flags = int(final_actuator["flags"]) if final_actuator is not None else 0
     final_target = (
         int(final_actuator["target_steps"]) if final_actuator is not None else None
@@ -1404,6 +2134,21 @@ def _build_live_verdict(
     driver_off_passed = (
         final_actuator is not None
         and (final_flags & ACTUATOR_FLAG_DRIVER_ENABLED) == 0
+    )
+    final_reserved = (
+        int(final_actuator.get("reserved", 0))
+        if final_actuator is not None
+        else 0
+    )
+    hil_metrics = hil_stroke.metrics() if hil_stroke is not None else {}
+    hil_full_passed = bool(
+        hil_stroke is not None and hil_stroke.full_reached_host_s is not None
+    )
+    hil_home_passed = bool(
+        hil_stroke is not None
+        and hil_stroke.complete
+        and final_reserved & ACTUATOR_STATUS_SOFTWARE_HOME_ACTIVE
+        and final_reserved & ACTUATOR_STATUS_STROKE_SEQUENCE_VERIFIED
     )
     heartbeat_passed = (
         receive_error_delta == 0 and transmit_drop_delta == 0
@@ -1453,6 +2198,50 @@ def _build_live_verdict(
                 else None
             ),
         ),
+        "fault_cleanup_energy_off": _acceptance_check(
+            bool(
+                safety_cleanup is not None
+                and safety_cleanup.get("motor_energy_off_verified")
+            ),
+            expected=True,
+            actual=(
+                safety_cleanup.get("motor_energy_off_verified")
+                if safety_cleanup is not None
+                else None
+            ),
+            applicable=cleanup_attempted,
+            note=(
+                "fault cleanup stops in place; it never performs a blind "
+                "automatic retract or HOME"
+            ),
+        ),
+        "hil_full_ramp_state": _acceptance_check(
+            hil_full_passed,
+            expected={
+                "software_full": True,
+                "evidence_boundary": (
+                    "target and XACTUAL are internal TMC5240 ramp-generator "
+                    "state, not endstop or encoder proof"
+                ),
+                "full_travel_steps": PRESENTATION_FULL_TRAVEL_STEPS,
+            },
+            actual=hil_metrics.get("full_status"),
+            applicable=continuous_hil,
+        ),
+        "hil_home_ramp_sequence": _acceptance_check(
+            hil_home_passed,
+            expected={
+                "software_home": True,
+                "stroke_sequence_verified": True,
+                "position_steps": 0,
+                "evidence_boundary": (
+                    "software geometry only; no independent mechanical "
+                    "position measurement"
+                ),
+            },
+            actual=hil_metrics.get("home_status"),
+            applicable=continuous_hil,
+        ),
         "decoder_errors": _acceptance_check(
             monitor.decoder.errors == 0,
             expected=0,
@@ -1467,13 +2256,22 @@ def _build_live_verdict(
             },
         ),
         "host_deadline": _acceptance_check(
-            max_schedule_lag_s <= 0.100,
-            expected="<= 0.100 seconds",
+            max_schedule_lag_s <= MAX_HOST_SCHEDULE_LAG_S,
+            expected=f"<= {MAX_HOST_SCHEDULE_LAG_S:.3f} seconds",
             actual=max_schedule_lag_s,
         ),
         "host_skip_ratio": _acceptance_check(
-            skip_ratio is not None and skip_ratio <= MAX_HOST_SKIP_RATIO,
-            expected=f"<= {MAX_HOST_SKIP_RATIO:.3f}",
+            skip_ratio is not None
+            and (
+                skipped_host_samples == 0
+                if continuous_hil
+                else skip_ratio <= MAX_HOST_SKIP_RATIO
+            ),
+            expected=(
+                "0 skipped samples"
+                if continuous_hil
+                else f"<= {MAX_HOST_SKIP_RATIO:.3f}"
+            ),
             actual=skip_ratio,
             note=(
                 "ratio is skipped samples divided by sent plus skipped samples; "
@@ -1516,6 +2314,8 @@ def _build_live_verdict(
             "telemetry_packets": monitor.telemetry_count,
             "actuator_packets": monitor.actuator_count,
             "event_packets": len(monitor.events),
+            "continuous_hil": continuous_hil,
+            **hil_metrics,
         },
         "transport": {
             "initial_heartbeat": initial_heartbeat,
@@ -1525,12 +2325,293 @@ def _build_live_verdict(
             "decoder_errors": monitor.decoder.errors,
         },
         "final_actuator": final_actuator,
+        "safety_cleanup": (
+            dict(safety_cleanup)
+            if safety_cleanup is not None
+            else {
+                "attempted": False,
+                "retract_attempted": False,
+                "policy": "normal_verified_shutdown",
+            }
+        ),
     }
 
 
 # ---------------------------------------------------------------------------
 # Guarded live replay, safety cleanup, and evidence finalization
 # ---------------------------------------------------------------------------
+
+
+def run_continuous_hil_preflight(
+    *,
+    port_name: str | None,
+    accept_current_position_home: bool = False,
+    clock: HostClock | None = None,
+    home_timeout_s: float = 10.0,
+) -> dict[str, Any]:
+    """Verify the HIL image and declare one operator-confirmed software HOME.
+
+    This bounded pass owns the serial port only for preflight. It checks
+    communications, build identity, driver state, and software geometry before
+    issuing ``CMD_HOME``. That command must only zero the current TMC5240 ramp
+    position; it must not seek or move the motor. The explicit acknowledgement
+    means the operator has manually placed the mechanism fully closed.
+
+    This declaration happens once per supervisor process. Later replay cycles
+    only verify that HOMED and XACTUAL/target near zero remain present. A
+    restart, resume, board reboot, or lost HOMED state requires a fresh
+    acknowledgement and a new declaration rather than an automatic re-zero.
+    """
+
+    if home_timeout_s <= 0.0:
+        raise ReplayError("HOME preflight timeout must be positive")
+    if not accept_current_position_home:
+        raise ReplayError(
+            "software HOME requires explicit confirmation that the mechanism "
+            "is manually fully closed; no serial port was opened"
+        )
+
+    active_clock = clock if clock is not None else PerfCounterClock()
+    started_host_s = active_clock.now()
+    sequence = SequenceCounter()
+    monitor = PacketMonitor(clock=active_clock)
+    serial, list_ports = _require_serial()
+    selected_port = _choose_port(list_ports, port_name)
+    cleanup_required = True
+    stages: list[dict[str, Any]] = []
+
+    def record_stage(name: str) -> None:
+        stages.append(
+            {
+                "stage": name,
+                "host_elapsed_s": round(active_clock.now() - started_host_s, 9),
+                "heartbeat": (
+                    dict(monitor.heartbeat)
+                    if monitor.heartbeat is not None
+                    else None
+                ),
+                "actuator": (
+                    dict(monitor.actuator)
+                    if monitor.actuator is not None
+                    else None
+                ),
+            }
+        )
+
+    with serial.Serial(
+        selected_port,
+        115200,
+        timeout=0.0,
+        write_timeout=1.0,
+    ) as port:
+        port.reset_input_buffer()
+        try:
+            ping_sequence = _send_command(
+                port,
+                sequence,
+                CMD_PING,
+                clock=active_clock,
+            )
+            _wait_for_ack(port, monitor, ping_sequence, CMD_PING)
+            snapshot_sequence = _send_command(
+                port,
+                sequence,
+                CMD_REQUEST_SNAPSHOT,
+                clock=active_clock,
+            )
+            _wait_for_ack(
+                port,
+                monitor,
+                snapshot_sequence,
+                CMD_REQUEST_SNAPSHOT,
+            )
+            _collect_preflight_status(port, monitor)
+
+            # No motion command is sent until every static safety gate passes.
+            _enforce_continuous_hil(monitor, require_geometry=False)
+            record_stage("static_gates_passed")
+
+            actuator_count_before_stop = monitor.actuator_count
+            disarm_sequence = _send_command(
+                port,
+                sequence,
+                CMD_SET_ARMED,
+                b"\x00",
+                clock=active_clock,
+            )
+            _wait_for_ack(
+                port,
+                monitor,
+                disarm_sequence,
+                CMD_SET_ARMED,
+            )
+            stop_sequence = _send_command(
+                port,
+                sequence,
+                CMD_SIM_STOP,
+                clock=active_clock,
+            )
+            _wait_for_ack(port, monitor, stop_sequence, CMD_SIM_STOP)
+            _wait_for_actuator(
+                port,
+                monitor,
+                lambda status: (
+                    int(status["flags"])
+                    & (
+                        ACTUATOR_FLAG_DRIVER_ENABLED
+                        | ACTUATOR_FLAG_MANUAL_PENDING
+                    )
+                )
+                == 0
+                and (
+                    int(status.get("reserved", 0))
+                    & ACTUATOR_STATUS_HIL_OVERRIDE_ACTIVE
+                )
+                == 0,
+                after_count=actuator_count_before_stop,
+                description="confirm an energy-off preflight state",
+                timeout_s=1.5,
+            )
+            _enforce_continuous_hil(monitor, require_geometry=False)
+            record_stage("energy_off_confirmed")
+
+            pre_zero_actuator = dict(monitor.actuator or {})
+            actuator_count_before_home = monitor.actuator_count
+            home_sequence = _send_command(
+                port,
+                sequence,
+                CMD_HOME,
+                clock=active_clock,
+            )
+            _wait_for_ack(port, monitor, home_sequence, CMD_HOME)
+            _wait_for_actuator(
+                port,
+                monitor,
+                lambda status: (
+                    int(status["flags"]) & ACTUATOR_FLAG_HOMED
+                )
+                != 0
+                and (
+                    int(status["flags"]) & ACTUATOR_FLAG_DRIVER_ENABLED
+                )
+                == 0
+                and (
+                    int(status.get("reserved", 0))
+                    & ACTUATOR_STATUS_SOFTWARE_HOME_ACTIVE
+                )
+                != 0
+                and (
+                    int(status.get("reserved", 0))
+                    & ACTUATOR_STATUS_SOFTWARE_FULL_ACTIVE
+                )
+                == 0,
+                after_count=actuator_count_before_home,
+                description="declare the current fully closed position as zero",
+                timeout_s=home_timeout_s,
+            )
+            if not _continuous_hil_ready_for_flight(monitor):
+                raise ReplayError(
+                    "software HOME completed without a zero reference and "
+                    "energy-off actuator state"
+                )
+            record_stage("software_home_declared")
+
+            actuator_count_before_final_stop = monitor.actuator_count
+            disarm_sequence = _send_command(
+                port,
+                sequence,
+                CMD_SET_ARMED,
+                b"\x00",
+                clock=active_clock,
+            )
+            _wait_for_ack(
+                port,
+                monitor,
+                disarm_sequence,
+                CMD_SET_ARMED,
+            )
+            stop_sequence = _send_command(
+                port,
+                sequence,
+                CMD_SIM_STOP,
+                clock=active_clock,
+            )
+            _wait_for_ack(port, monitor, stop_sequence, CMD_SIM_STOP)
+            _wait_for_actuator(
+                port,
+                monitor,
+                lambda status: (
+                    int(status["flags"])
+                    & (
+                        ACTUATOR_FLAG_DRIVER_ENABLED
+                        | ACTUATOR_FLAG_MANUAL_PENDING
+                    )
+                )
+                == 0
+                and (
+                    int(status.get("reserved", 0))
+                    & ACTUATOR_STATUS_SOFTWARE_HOME_ACTIVE
+                )
+                != 0,
+                after_count=actuator_count_before_final_stop,
+                description="confirm software HOME remains energy-off",
+                timeout_s=1.5,
+            )
+            if not _continuous_hil_ready_for_flight(monitor):
+                raise ReplayError(
+                    "final HIL preflight state is not software-HOME-ready"
+                )
+            record_stage("final_energy_off")
+
+            cleanup_required = False
+            assert monitor.heartbeat is not None
+            assert monitor.actuator is not None
+            return {
+                "schema": "ambar.continuous_hil_preflight.v1",
+                "selected_port": selected_port,
+                "feature_flags": int(monitor.heartbeat["feature_flags"]),
+                "heartbeat": dict(monitor.heartbeat),
+                "actuator": dict(monitor.actuator),
+                "stages": stages,
+                "home_verified": True,
+                "software_home_declared": True,
+                "operator_confirmed_manually_fully_closed": True,
+                "home_method": "operator-confirmed current position set to XACTUAL=0",
+                "pre_zero_actuator": pre_zero_actuator,
+                "position_evidence_boundary": (
+                    "TMC target/XACTUAL only; no encoder or endstop proof"
+                ),
+                "motor_energy_off": True,
+            }
+        finally:
+            if cleanup_required:
+                try:
+                    port.write(
+                        command_frame(
+                            sequence.take(),
+                            CMD_HIL_SET_OVERRIDE,
+                            bytes((HIL_OVERRIDE_OFF,)),
+                            time_ms=_host_packet_time_ms(active_clock),
+                        )
+                    )
+                    port.write(
+                        command_frame(
+                            sequence.take(),
+                            CMD_SET_ARMED,
+                            b"\x00",
+                            time_ms=_host_packet_time_ms(active_clock),
+                        )
+                    )
+                    port.write(
+                        command_frame(
+                            sequence.take(),
+                            CMD_SIM_STOP,
+                            time_ms=_host_packet_time_ms(active_clock),
+                        )
+                    )
+                    active_clock.sleep(0.1)
+                except Exception:
+                    pass
 
 
 def run_live_replay(
@@ -1551,6 +2632,14 @@ def run_live_replay(
     run_bundle_dir: str | Path | None = None,
     gui_udp_port: int | None = None,
     run_metadata: Mapping[str, Any] | None = None,
+    continuous_hil: bool = False,
+    burn_time_s: float | None = None,
+    post_burn_margin_s: float = 0.1,
+    full_hold_s: float = 8.0,
+    endpoint_timeout_s: float = 8.0,
+    sample_metadata: Sequence[Mapping[str, Any]] | None = None,
+    event_sink: Callable[[Mapping[str, Any]], None] | None = None,
+    event_log_name: str = "packets.jsonl",
 ) -> dict[str, Any]:
     """Run one guarded USB replay and return its machine-readable verdict.
 
@@ -1566,6 +2655,9 @@ def run_live_replay(
         clock=active_clock,
         bundle_dir=run_bundle_dir,
         gui_udp_port=gui_udp_port,
+        event_sink=event_sink,
+        event_log_name=event_log_name,
+        record_context=run_metadata,
     )
     sequence = SequenceCounter()
     monitor = PacketMonitor(clock=active_clock, observer=observer)
@@ -1575,6 +2667,8 @@ def run_live_replay(
     completed = False
     failure: BaseException | None = None
     verdict: dict[str, Any]
+    hil_stroke: HilStrokeTracker | None = None
+    safety_cleanup: dict[str, Any] | None = None
 
     observer.start(
         {
@@ -1607,7 +2701,16 @@ def run_live_replay(
             },
             "motion": {
                 "enabled": allow_actuator_motion,
+                "continuous_hil": continuous_hil,
                 "home_at_current_position_acknowledged": home_at_current_position,
+                "software_home_method": (
+                    "operator-confirmed fully closed position declared XACTUAL=0"
+                    if home_at_current_position
+                    else None
+                ),
+                "position_evidence_boundary": (
+                    "TMC target/XACTUAL internal ramp state; no encoder or endstop"
+                ),
                 "no_arm": no_arm,
                 "full_extension_rotations": rotations,
                 "full_steps_per_revolution": full_steps_per_revolution,
@@ -1627,10 +2730,15 @@ def run_live_replay(
             raise ReplayError("arm-after must occur during the prepad interval")
         if not 10.0 <= target_apogee_m <= 6553.5:
             raise ReplayError("target apogee must be within 10.0..6553.5 m")
+        if continuous_hil and not allow_actuator_motion:
+            raise ReplayError("continuous HIL requires actuator motion")
+        if continuous_hil and burn_time_s is None:
+            raise ReplayError("continuous HIL requires the RocketPy motor burn time")
         if allow_actuator_motion and not home_at_current_position:
             raise ReplayError(
-                "motion mode requires --home-at-current-position after physically "
-                "placing the mechanism at its fully retracted position"
+                "motion mode requires explicit acknowledgement that the "
+                "mechanism was manually placed fully closed before software "
+                "HOME was declared"
             )
         if home_at_current_position and not allow_actuator_motion:
             raise ReplayError(
@@ -1645,18 +2753,38 @@ def run_live_replay(
                 microsteps=microsteps,
                 gear_ratio=gear_ratio,
             )
+        if continuous_hil:
+            hil_stroke = HilStrokeTracker(
+                burn_time_s=float(burn_time_s),
+                post_burn_margin_s=post_burn_margin_s,
+                full_hold_s=full_hold_s,
+                endpoint_timeout_s=endpoint_timeout_s,
+            )
+            if sample_metadata is not None and len(sample_metadata) != len(
+                profile.samples
+            ):
+                raise ReplayError(
+                    "sample metadata must align one-for-one with replay samples"
+                )
 
         serial, list_ports = _require_serial()
         selected_port = _choose_port(list_ports, port_name)
         observer.emit("serial_selected", port=selected_port)
         if allow_actuator_motion:
             print(
-                f"Opening {selected_port} at 115200; PRESENTATION MOTOR MOTION ENABLED."
+                f"Opening {selected_port} at 115200; MOTOR MOTION ENABLED."
             )
-            print(
-                "HOME will declare the mechanism's current physical position as "
-                "fully retracted."
-            )
+            if continuous_hil:
+                print(
+                    "Software HOME was declared by the supervisor from the "
+                    "operator-confirmed fully closed position. This cycle will "
+                    "verify it without re-zeroing."
+                )
+            else:
+                print(
+                    "CMD_HOME will declare the manually fully closed current "
+                    "position as XACTUAL=0 without motor motion."
+                )
         else:
             print(
                 f"Opening {selected_port} at 115200; physical motion must remain disabled."
@@ -1719,7 +2847,10 @@ def run_live_replay(
                         description="report its stopped preflight state",
                         timeout_s=1.5,
                     )
-                    _enforce_actuator_motion(monitor)
+                    if continuous_hil:
+                        _enforce_continuous_hil(monitor)
+                    else:
+                        _enforce_actuator_motion(monitor)
                     assert monitor.heartbeat is not None
                     direction = (
                         "negative"
@@ -1733,27 +2864,56 @@ def run_live_replay(
                         f"extension direction is {direction}."
                     )
 
-                    actuator_count_before_home = monitor.actuator_count
-                    home_sequence = _send_command(port, sequence, CMD_HOME)
-                    _wait_for_ack(port, monitor, home_sequence, CMD_HOME)
-                    _wait_for_actuator(
-                        port,
-                        monitor,
-                        lambda status: (
-                            int(status["flags"]) & ACTUATOR_FLAG_HOMED
+                    if continuous_hil:
+                        ready_for_flight = _continuous_hil_ready_for_flight(
+                            monitor
                         )
-                        != 0,
-                        after_count=actuator_count_before_home,
-                        description="confirm HOME",
-                        timeout_s=1.5,
-                    )
-                    if not _actuator_ready_for_flight(monitor):
+                    else:
+                        actuator_count_before_home = monitor.actuator_count
+                        home_sequence = _send_command(
+                            port,
+                            sequence,
+                            CMD_HOME,
+                        )
+                        _wait_for_ack(
+                            port,
+                            monitor,
+                            home_sequence,
+                            CMD_HOME,
+                        )
+                        _wait_for_actuator(
+                            port,
+                            monitor,
+                            lambda status: (
+                                int(status["flags"]) & ACTUATOR_FLAG_HOMED
+                            )
+                            != 0
+                            and (
+                                int(status.get("reserved", 0))
+                                & ACTUATOR_STATUS_SOFTWARE_HOME_ACTIVE
+                            )
+                            != 0
+                            and (
+                                int(status.get("reserved", 0))
+                                & ACTUATOR_STATUS_SOFTWARE_FULL_ACTIVE
+                            )
+                            == 0,
+                            after_count=actuator_count_before_home,
+                            description="declare software HOME",
+                            timeout_s=1.5,
+                        )
+                        ready_for_flight = _actuator_ready_for_flight(
+                            monitor
+                        )
+                    if not ready_for_flight:
                         raise ReplayError(
-                            "HOME completed but actuator is not ready: "
+                            "software HOME is missing or no longer ready; "
+                            "the supervisor will not re-zero automatically: "
                             f"{monitor.actuator}"
                         )
                     print(
-                        "Actuator HOME accepted; current position is now 0% deployment."
+                        "Software HOME verified at target/XACTUAL zero with "
+                        "motor energy off."
                     )
 
                 target_dm = round(target_apogee_m * 10.0)
@@ -1779,28 +2939,31 @@ def run_live_replay(
                 simulation_active_seen = False
                 start = active_clock.now()
                 next_progress_s = 0.0
-                late_skip_threshold_s = 0.5 / profile.rate_hz
+                previous_hil_state = (
+                    hil_stroke.state if hil_stroke is not None else None
+                )
 
                 for sample_index, sample in enumerate(profile.samples):
-                    deadline = start + sample.replay_time_s
-                    now = active_clock.now()
-                    while now < deadline:
-                        monitor.poll(port)
-                        now = active_clock.now()
-                        if now < deadline:
-                            active_clock.sleep(
-                                min(0.002, deadline - now)
-                            )
-                            now = active_clock.now()
-
-                    lag = now - deadline
-                    max_schedule_lag_s = max(max_schedule_lag_s, lag)
-                    if lag > 0.100:
-                        raise ReplayError(
-                            "host missed a replay deadline by "
-                            f"{lag * 1000.0:.1f} ms"
+                    try:
+                        deadline_result = _wait_for_replay_deadline(
+                            active_clock,
+                            lambda: monitor.poll(port),
+                            start_s=start,
+                            replay_time_s=sample.replay_time_s,
+                            rate_hz=profile.rate_hz,
+                            continuous_hil=continuous_hil,
                         )
-                    if lag > late_skip_threshold_s:
+                    except ReplayDeadlineError as deadline_error:
+                        max_schedule_lag_s = max(
+                            max_schedule_lag_s,
+                            deadline_error.lag_s,
+                        )
+                        raise
+                    lag = deadline_result.lag_s
+                    max_schedule_lag_s = max(max_schedule_lag_s, lag)
+                    if deadline_result.rebase_s > 0.0:
+                        start += deadline_result.rebase_s
+                    if deadline_result.skip:
                         # Preserve the absolute timeline. An overdue row is
                         # skipped instead of creating a catch-up USB burst.
                         monitor.poll(port)
@@ -1831,11 +2994,15 @@ def run_live_replay(
                         replay_time_s=sample.replay_time_s,
                         source_time_s=sample.source_time_s,
                         schedule_lag_s=lag,
+                        schedule_rebase_s=deadline_result.rebase_s,
                         sequence=packet_sequence,
                     )
                     monitor.poll(port)
                     if allow_actuator_motion:
-                        _assert_motion_runtime_healthy(monitor)
+                        _assert_motion_runtime_healthy(
+                            monitor,
+                            continuous_hil=continuous_hil,
+                        )
 
                     start_ack = monitor.acks.get(sim_start_sequence)
                     if start_ack is not None:
@@ -1896,6 +3063,50 @@ def run_live_replay(
                             "arm command was not acknowledged before launch data began"
                         )
 
+                    if (
+                        continuous_hil
+                        and arm_acknowledged
+                        and hil_stroke is not None
+                    ):
+                        requested_override = hil_stroke.observe(
+                            source_time_s=sample.source_time_s,
+                            telemetry=monitor.telemetry,
+                            actuator=monitor.actuator,
+                            host_now_s=active_clock.now(),
+                        )
+                        if requested_override is not None:
+                            _set_hil_override(
+                                port,
+                                monitor,
+                                sequence,
+                                requested_override,
+                                observer=observer,
+                            )
+                        if hil_stroke.state != previous_hil_state:
+                            observer.emit(
+                                "hil_stroke_state",
+                                previous_state=previous_hil_state,
+                                current_state=hil_stroke.state,
+                                source_time_s=sample.source_time_s,
+                                actuator=monitor.actuator,
+                            )
+                            previous_hil_state = hil_stroke.state
+
+                    _emit_sample_observed(
+                        observer,
+                        sample_index=sample_index,
+                        sample=sample,
+                        schedule_lag_s=lag,
+                        monitor=monitor,
+                        hil_stroke=hil_stroke,
+                        metadata=(
+                            sample_metadata[sample_index]
+                            if sample_metadata is not None
+                            else None
+                        ),
+                        skipped_host_samples=skipped_host_samples,
+                    )
+
                     if sample.replay_time_s >= next_progress_s:
                         _print_progress(
                             sample.replay_time_s,
@@ -1908,6 +3119,125 @@ def run_live_replay(
                         )
                         next_progress_s += 1.0
 
+                if continuous_hil:
+                    assert hil_stroke is not None
+                    requested_override = hil_stroke.require_home(
+                        active_clock.now()
+                    )
+                    if requested_override is not None:
+                        _set_hil_override(
+                            port,
+                            monitor,
+                            sequence,
+                            requested_override,
+                            observer=observer,
+                        )
+                    last_sample = profile.samples[-1]
+                    tail_index = len(profile.samples)
+                    tail_deadline = (
+                        active_clock.now()
+                        + endpoint_timeout_s * 2.0
+                        + full_hold_s
+                        + 1.0
+                    )
+                    next_tail_send = active_clock.now()
+                    while not hil_stroke.complete:
+                        now = active_clock.now()
+                        if now >= tail_deadline:
+                            raise ReplayError(
+                                "forced ramp-state sequence did not return to "
+                                "software HOME before the "
+                                "bounded replay tail deadline"
+                            )
+                        if now < next_tail_send:
+                            monitor.poll(port)
+                            active_clock.sleep(min(0.002, next_tail_send - now))
+                            continue
+                        packet_sequence = sequence.take()
+                        port.write(
+                            simulation_frame(
+                                packet_sequence,
+                                altitude_m=last_sample.altitude_m,
+                                acceleration_mps2=(
+                                    last_sample.vertical_acceleration_mps2
+                                ),
+                                velocity_mps=last_sample.vertical_velocity_mps,
+                                barometer_stddev_m=barometer_stddev_m,
+                                time_ms=_host_packet_time_ms(active_clock),
+                            )
+                        )
+                        sent_host_samples += 1
+                        monitor.poll(port)
+                        _assert_motion_runtime_healthy(
+                            monitor,
+                            continuous_hil=True,
+                        )
+                        requested_override = hil_stroke.observe(
+                            source_time_s=last_sample.source_time_s,
+                            telemetry=monitor.telemetry,
+                            actuator=monitor.actuator,
+                            host_now_s=active_clock.now(),
+                        )
+                        if requested_override is not None:
+                            _set_hil_override(
+                                port,
+                                monitor,
+                                sequence,
+                                requested_override,
+                                observer=observer,
+                            )
+                        if hil_stroke.state != previous_hil_state:
+                            observer.emit(
+                                "hil_stroke_state",
+                                previous_state=previous_hil_state,
+                                current_state=hil_stroke.state,
+                                source_time_s=last_sample.source_time_s,
+                                actuator=monitor.actuator,
+                            )
+                            previous_hil_state = hil_stroke.state
+                        _emit_sample_observed(
+                            observer,
+                            sample_index=tail_index,
+                            sample=last_sample,
+                            schedule_lag_s=0.0,
+                            monitor=monitor,
+                            hil_stroke=hil_stroke,
+                            metadata=(
+                                sample_metadata[-1]
+                                if sample_metadata is not None
+                                else None
+                            ),
+                            skipped_host_samples=skipped_host_samples,
+                        )
+                        tail_index += 1
+                        next_tail_send += 1.0 / profile.rate_hz
+
+                    actuator_count_before_off = monitor.actuator_count
+                    _set_hil_override(
+                        port,
+                        monitor,
+                        sequence,
+                        HIL_OVERRIDE_OFF,
+                        observer=observer,
+                    )
+                    _wait_for_actuator(
+                        port,
+                        monitor,
+                        lambda status: (
+                            int(status["flags"])
+                            & ACTUATOR_FLAG_DRIVER_ENABLED
+                        )
+                        == 0
+                        and (
+                            int(status.get("reserved", 0))
+                            & ACTUATOR_STATUS_HIL_OVERRIDE_ACTIVE
+                        )
+                        == 0,
+                        after_count=actuator_count_before_off,
+                        description="clear HIL override and remove motor energy",
+                        timeout_s=1.5,
+                    )
+
                 disarm_sequence = _send_command(
                     port,
                     sequence,
@@ -1917,7 +3247,7 @@ def run_live_replay(
                 _wait_for_ack(port, monitor, disarm_sequence, CMD_SET_ARMED)
                 stop_sequence = _send_command(port, sequence, CMD_SIM_STOP)
                 _wait_for_ack(port, monitor, stop_sequence, CMD_SIM_STOP)
-                if allow_actuator_motion:
+                if allow_actuator_motion and not continuous_hil:
                     actuator_count_before_retract = monitor.actuator_count
                     retract_sequence = _send_command(port, sequence, CMD_RETRACT)
                     _wait_for_ack(port, monitor, retract_sequence, CMD_RETRACT)
@@ -1949,34 +3279,14 @@ def run_live_replay(
                 cleanup_required = False
             finally:
                 if cleanup_required:
-                    observer.emit(
-                        "safety_cleanup",
-                        commands=[CMD_SET_ARMED, CMD_SIM_STOP],
-                        retract_attempted=False,
+                    safety_cleanup = _perform_safety_cleanup(
+                        port,
+                        monitor,
+                        sequence,
+                        observer,
+                        active_clock,
+                        continuous_hil=continuous_hil,
                     )
-                    try:
-                        port.write(
-                            command_frame(
-                                sequence.take(),
-                                CMD_SET_ARMED,
-                                b"\x00",
-                                time_ms=_host_packet_time_ms(active_clock),
-                            )
-                        )
-                        port.write(
-                            command_frame(
-                                sequence.take(),
-                                CMD_SIM_STOP,
-                                time_ms=_host_packet_time_ms(active_clock),
-                            )
-                        )
-                        active_clock.sleep(0.1)
-                    except Exception as cleanup_error:
-                        observer.emit(
-                            "safety_cleanup_error",
-                            error_type=type(cleanup_error).__name__,
-                            error=str(cleanup_error),
-                        )
 
         phases = " -> ".join(
             PHASE_NAMES.get(value, str(value)) for value in monitor.phase_order
@@ -2025,6 +3335,9 @@ def run_live_replay(
             max_schedule_lag_s=max_schedule_lag_s,
             skipped_host_samples=skipped_host_samples,
             sent_host_samples=sent_host_samples,
+            continuous_hil=continuous_hil,
+            hil_stroke=hil_stroke,
+            safety_cleanup=safety_cleanup,
         )
         observer.finalize(verdict)
 
@@ -2091,16 +3404,16 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--allow-actuator-motion",
         action="store_true",
         help=(
-            "enable the separately gated presentation motor path; requires the "
-            "presentation firmware build and --home-at-current-position"
+            "enable the separately gated motor path; requires the "
+            "CONTINUOUS_HIL firmware and --home-at-current-position"
         ),
     )
     parser.add_argument(
         "--home-at-current-position",
         action="store_true",
         help=(
-            "confirm the mechanism is physically fully retracted and declare its "
-            "current position as HOME before replay"
+            "confirm the mechanism is manually fully closed and authorize "
+            "CMD_HOME to declare the current TMC ramp position as XACTUAL=0"
         ),
     )
     parser.add_argument("--arm-after-s", type=float, default=0.5)

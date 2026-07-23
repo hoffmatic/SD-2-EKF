@@ -58,6 +58,7 @@
 #include "ambar_flight.h"
 #include "ambar_log.h"
 #include "ambar_usb.h"
+#include "ambar_variable_hil_policy.h"
 #include "radio_bridge.h"
 #include "rocket_protocol.h"
 #include "rocket_sensors.h"
@@ -80,7 +81,11 @@
 #define AMBAR_USB_TELEMETRY_PERIOD_MS 50U
 #define AMBAR_USB_ACTUATOR_PERIOD_MS  100U
 #define AMBAR_USB_HEARTBEAT_PERIOD_MS 1000U
+#if AMBAR_BUILD_IS_VARIABLE_HIL
+#define AMBAR_SIMULATION_TIMEOUT_MS   100U
+#else
 #define AMBAR_SIMULATION_TIMEOUT_MS   500U
+#endif
 #define AMBAR_USB_COMMAND_CACHE_DEPTH 8U
 #define AMBAR_USB_TARGET_APOGEE_MIN_DM 100U
 
@@ -137,10 +142,16 @@ static AmbarUsbCommandCacheEntry_t
 static uint8_t s_usb_command_cache_next = 0U;
 static bool s_simulation_active = false;
 static bool s_simulation_sample_valid = false;
+static bool s_simulation_imu_pending = false;
 static bool s_simulation_barometer_pending = false;
 static bool s_simulation_stale = false;
 static uint32_t s_last_simulation_sample_ms = 0U;
 static RocketSimulationPayload s_simulation_sample;
+static uint16_t s_last_simulation_sequence = 0U;
+static bool s_variable_hil_state_pending = false;
+static bool s_variable_hil_config_uploaded = false;
+static uint32_t s_variable_hil_config_crc32 = 0UL;
+static RocketVariableHilConfigPayload s_variable_hil_config;
 
 /* -------------------- Shared numeric and presentation helpers -------------------- */
 
@@ -152,6 +163,8 @@ static bool ambar_actuator_motion_active(void)
      * starve actuator servicing while the mechanism is moving.
      */
     return s_actuator_state.driver_enabled
+        || s_actuator_state.homing_active != 0U
+        || s_actuator_state.hil_override_mode != AMBAR_ACTUATOR_HIL_OVERRIDE_OFF
         || s_actuator_state.manual_request_pending != 0U
         || s_actuator_state.automatic_motion_active != 0U
         || s_actuator_state.automatic_deployment_latched != 0U
@@ -204,6 +217,7 @@ static uint8_t ambar_deployment_percent(const AmbarFlightOutput_t *output)
     return (uint8_t)(percent + 0.5f);
 }
 
+#if AMBAR_FEATURE_EFFECTIVE_TELEMETRY
 static void ambar_fill_legacy_calc(uint16_t calc_data[4],
                                    const AmbarFlightOutput_t *output,
                                    uint8_t deployment_percent)
@@ -221,6 +235,7 @@ static void ambar_fill_legacy_calc(uint16_t calc_data[4],
     calc_data[2] = (uint16_t)deployment_percent;
     calc_data[3] = (uint16_t)output->phase;
 }
+#endif
 
 #if AMBAR_FEATURE_VERBOSE_STATUS_TEXT
 static const char *ambar_status_message(const AmbarFlightOutput_t *output)
@@ -279,6 +294,279 @@ static void ambar_refresh_config_crc(AmbarConfig_t *config)
     config->crc32 = AmbarConfig_Crc32((const uint8_t *)config, sizeof(*config));
 }
 
+#if AMBAR_BUILD_IS_VARIABLE_HIL
+static uint16_t ambar_variable_hil_u16(float value, float scale)
+{
+    if (!isfinite(value) || value <= 0.0f)
+    {
+        return 0U;
+    }
+    const float scaled = value * scale;
+    return scaled >= 65535.0f ? UINT16_MAX : (uint16_t)(scaled + 0.5f);
+}
+
+static int16_t ambar_variable_hil_i16(float value, float scale)
+{
+    if (!isfinite(value))
+    {
+        return 0;
+    }
+    const float scaled = value * scale;
+    if (scaled >= 32767.0f)
+    {
+        return INT16_MAX;
+    }
+    if (scaled <= -32768.0f)
+    {
+        return INT16_MIN;
+    }
+    return (int16_t)(scaled >= 0.0f ? scaled + 0.5f : scaled - 0.5f);
+}
+
+static uint8_t ambar_variable_hil_u8(float value, float scale)
+{
+    if (!isfinite(value) || value <= 0.0f)
+    {
+        return 0U;
+    }
+    const float scaled = value * scale;
+    return scaled >= 255.0f ? UINT8_MAX : (uint8_t)(scaled + 0.5f);
+}
+
+static bool ambar_variable_hil_fraction_from_steps(int32_t steps,
+                                                    float *fraction)
+{
+    if (fraction == NULL
+        || !s_actuator_state.config_valid
+        || !s_actuator_state.homed
+        || s_actuator_state.max_extension_steps <= 0)
+    {
+        return false;
+    }
+
+    int64_t travel = (int64_t)steps
+                   - (int64_t)s_actuator_state.home_position_steps;
+    if (s_actuator_state.direction_inverted != 0U)
+    {
+        travel = -travel;
+    }
+    float value = (float)travel / (float)s_actuator_state.max_extension_steps;
+    if (value < 0.0f)
+    {
+        value = 0.0f;
+    }
+    if (value > 1.0f)
+    {
+        value = 1.0f;
+    }
+    *fraction = value;
+    return true;
+}
+
+static uint16_t ambar_variable_hil_fraction_u16_from_steps(int32_t steps)
+{
+    float fraction = 0.0f;
+    if (!ambar_variable_hil_fraction_from_steps(steps, &fraction))
+    {
+        return 0U;
+    }
+    return ambar_variable_hil_u16(fraction, (float)ROCKET_FRACTION_U16_FULL_SCALE);
+}
+
+static uint16_t ambar_variable_hil_fraction_u16(float fraction)
+{
+    if (!isfinite(fraction) || fraction <= 0.0f)
+    {
+        return 0U;
+    }
+    if (fraction >= 1.0f)
+    {
+        return ROCKET_FRACTION_U16_FULL_SCALE;
+    }
+    return (uint16_t)(fraction * (float)ROCKET_FRACTION_U16_FULL_SCALE + 0.5f);
+}
+
+static bool ambar_variable_hil_encode_config(
+    const AmbarFlightConfig_t *flight,
+    RocketVariableHilConfigPayload *wire,
+    uint8_t encoded[ROCKET_VARIABLE_HIL_CONFIG_PAYLOAD_SIZE])
+{
+    if (flight == NULL || wire == NULL || encoded == NULL)
+    {
+        return false;
+    }
+
+    memset(wire, 0, sizeof(*wire));
+    wire->schema_version = ROCKET_VARIABLE_HIL_CONFIG_VERSION;
+    wire->control_mode = (uint8_t)flight->controller.control_mode;
+    wire->predictor_mode = (uint8_t)flight->apogee.mode;
+    wire->cda_point_count = ROCKET_VARIABLE_HIL_CDA_POINT_COUNT;
+    wire->calibration_version = flight->apogee.calibration_version;
+    wire->target_apogee_dm =
+        ambar_variable_hil_u16(flight->controller.target_apogee_m, 10.0f);
+    wire->mission_tolerance_dm =
+        ambar_variable_hil_u16(flight->controller.mission_tolerance_m, 10.0f);
+    wire->control_deadband_cm =
+        ambar_variable_hil_u16(flight->controller.control_deadband_m, 100.0f);
+    wire->full_deployment_error_dm =
+        ambar_variable_hil_u16(flight->controller.full_deployment_error_m, 10.0f);
+    wire->minimum_deploy_altitude_dm =
+        ambar_variable_hil_u16(flight->controller.minimum_deploy_altitude_m, 10.0f);
+    wire->minimum_flight_time_cs =
+        ambar_variable_hil_u16(flight->controller.minimum_flight_time_s, 100.0f);
+    wire->predictive_update_period_ms =
+        ambar_variable_hil_u16(flight->controller.predictive_update_period_s, 1000.0f);
+    wire->coast_mass_g =
+        ambar_variable_hil_u16(flight->apogee.coast_mass_kg, 1000.0f);
+    wire->maximum_deploy_u8 =
+        ambar_variable_hil_u8(flight->controller.maximum_deploy_fraction, 255.0f);
+    wire->hysteresis_permille =
+        ambar_variable_hil_u8(flight->controller.deployment_hysteresis_fraction,
+                              1000.0f);
+    for (uint8_t i = 0U; i < ROCKET_VARIABLE_HIL_CDA_POINT_COUNT; ++i)
+    {
+        wire->deployment_cda_um2[i] =
+            ambar_variable_hil_u16(flight->apogee.deployment_drag_area_m2[i],
+                                   1000000.0f);
+    }
+    wire->air_density_1e4_kgpm3 =
+        ambar_variable_hil_u16(flight->apogee.sea_level_air_density_kgpm3,
+                               10000.0f);
+    wire->density_scale_height_m =
+        ambar_variable_hil_u16(flight->apogee.density_scale_height_m, 1.0f);
+    wire->launch_site_elevation_dm =
+        ambar_variable_hil_i16(flight->apogee.launch_site_elevation_m, 10.0f);
+    wire->actuator_delay_ms =
+        ambar_variable_hil_u16(flight->apogee.actuator_delay_s, 1000.0f);
+    wire->actuator_open_rate_milli_per_s = ambar_variable_hil_u16(
+        flight->apogee.actuator_open_rate_fraction_per_s, 1000.0f);
+    wire->actuator_close_rate_milli_per_s = ambar_variable_hil_u16(
+        flight->apogee.actuator_close_rate_fraction_per_s, 1000.0f);
+    wire->config_crc32 = 0UL;
+    if (RocketProtocol_EncodeVariableHilConfigPayload(encoded,
+                                                       ROCKET_VARIABLE_HIL_CONFIG_PAYLOAD_SIZE,
+                                                       wire)
+        != ROCKET_VARIABLE_HIL_CONFIG_PAYLOAD_SIZE)
+    {
+        return false;
+    }
+    wire->config_crc32 = AmbarConfig_Crc32(encoded,
+                                            ROCKET_VARIABLE_HIL_CONFIG_PAYLOAD_SIZE - 4U);
+    return RocketProtocol_EncodeVariableHilConfigPayload(
+               encoded,
+               ROCKET_VARIABLE_HIL_CONFIG_PAYLOAD_SIZE,
+               wire) == ROCKET_VARIABLE_HIL_CONFIG_PAYLOAD_SIZE;
+}
+
+static bool ambar_variable_hil_apply_config(
+    const RocketVariableHilConfigPayload *wire,
+    uint32_t *invalid_flags)
+{
+    AmbarFlightConfig_t flight;
+
+    if (wire == NULL)
+    {
+        return false;
+    }
+    AmbarFlight_GetConfigSnapshot(&flight);
+    flight.controller.target_apogee_m = (float)wire->target_apogee_dm * 0.1f;
+    flight.controller.mission_tolerance_m =
+        (float)wire->mission_tolerance_dm * 0.1f;
+    flight.controller.apogee_tolerance_m = flight.controller.mission_tolerance_m;
+    flight.controller.control_deadband_m =
+        (float)wire->control_deadband_cm * 0.01f;
+    flight.controller.full_deployment_error_m =
+        (float)wire->full_deployment_error_dm * 0.1f;
+    flight.controller.minimum_deploy_altitude_m =
+        (float)wire->minimum_deploy_altitude_dm * 0.1f;
+    flight.controller.minimum_flight_time_s =
+        (float)wire->minimum_flight_time_cs * 0.01f;
+    flight.controller.predictive_update_period_s =
+        (float)wire->predictive_update_period_ms * 0.001f;
+    flight.controller.maximum_deploy_fraction =
+        (float)wire->maximum_deploy_u8 / 255.0f;
+    flight.controller.deployment_hysteresis_fraction =
+        (float)wire->hysteresis_permille * 0.001f;
+    flight.controller.control_mode = (AmbarAirbrakeControlMode_t)wire->control_mode;
+
+    flight.apogee.mode = (AmbarApogeePredictionMode_t)wire->predictor_mode;
+    flight.apogee.calibration_version = wire->calibration_version;
+    flight.apogee.coast_mass_kg = (float)wire->coast_mass_g * 0.001f;
+    flight.apogee.baseline_drag_area_m2 =
+        (float)wire->deployment_cda_um2[0] * 0.000001f;
+    for (uint8_t i = 0U; i < ROCKET_VARIABLE_HIL_CDA_POINT_COUNT; ++i)
+    {
+        flight.apogee.deployment_drag_area_m2[i] =
+            (float)wire->deployment_cda_um2[i] * 0.000001f;
+    }
+    flight.apogee.sea_level_air_density_kgpm3 =
+        (float)wire->air_density_1e4_kgpm3 * 0.0001f;
+    flight.apogee.density_scale_height_m =
+        (float)wire->density_scale_height_m;
+    flight.apogee.launch_site_elevation_m =
+        (float)wire->launch_site_elevation_dm * 0.1f;
+    flight.apogee.actuator_delay_s = (float)wire->actuator_delay_ms * 0.001f;
+    flight.apogee.actuator_open_rate_fraction_per_s =
+        (float)wire->actuator_open_rate_milli_per_s * 0.001f;
+    flight.apogee.actuator_close_rate_fraction_per_s =
+        (float)wire->actuator_close_rate_milli_per_s * 0.001f;
+
+    if (!AmbarFlight_ApplyControlConfig(&flight.controller,
+                                        &flight.apogee,
+                                        invalid_flags))
+    {
+        return false;
+    }
+    AmbarFlight_GetConfigSnapshot(&flight);
+    s_config.flight.controller = flight.controller;
+    s_config.flight.apogee = flight.apogee;
+    ambar_refresh_config_crc(&s_config);
+    return true;
+}
+
+static void ambar_variable_hil_shutdown(
+    AmbarVariableHilShutdownReason_t reason)
+{
+    const AmbarVariableHilShutdownActions_t actions =
+        AmbarVariableHilPolicy_ShutdownActions(reason);
+
+    if (actions.stop_simulation)
+    {
+        s_simulation_active = false;
+    }
+    if (actions.invalidate_sample)
+    {
+        s_simulation_sample_valid = false;
+        s_simulation_imu_pending = false;
+    }
+    if (actions.clear_barometer_pending)
+    {
+        s_simulation_barometer_pending = false;
+    }
+    if (actions.clear_correlated_state)
+    {
+        s_variable_hil_state_pending = false;
+    }
+    if (actions.clear_config_upload)
+    {
+        s_variable_hil_config_uploaded = false;
+    }
+    s_simulation_stale = actions.mark_simulation_stale;
+    if (actions.disarm_flight)
+    {
+        AmbarFlight_SetArmed(false);
+    }
+    if (actions.stop_and_cancel_motion)
+    {
+        (void)AmbarActuator_StopAndCancel(&s_actuator_state);
+    }
+    if (actions.reset_flight_on_pad)
+    {
+        AmbarFlight_ResetOnPad((float)HAL_GetTick() * 0.001f);
+    }
+}
+#endif
+
 /* -------------------- Runtime configuration fan-out ([ARCH-2], [ARCH-4], [ARCH-5]) -------------------- */
 
 static void ambar_apply_runtime_config(uint8_t reset_estimator)
@@ -327,7 +615,7 @@ static bool ambar_set_config_value(const char *key, float value, char *response,
         return false;
     }
 
-#if AMBAR_FEATURE_PRESENTATION_MOTION
+#if AMBAR_ACTUATOR_USE_PROTOTYPE_PROFILE
     if (strcmp(key, "HOME_STEPS") == 0
         || strcmp(key, "MAX_STEPS") == 0
         || strcmp(key, "RUN_CURRENT_MA") == 0
@@ -335,7 +623,7 @@ static bool ambar_set_config_value(const char *key, float value, char *response,
         || strcmp(key, "MAX_VELOCITY") == 0
         || strcmp(key, "MAX_ACCEL") == 0)
     {
-        (void)snprintf(response, response_len, "NACK:PRESENTATION_PROFILE_LOCKED");
+        (void)snprintf(response, response_len, "NACK:ACTUATOR_PROFILE_LOCKED");
         return false;
     }
 #endif
@@ -353,6 +641,8 @@ static bool ambar_set_config_value(const char *key, float value, char *response,
     else if (strcmp(key, "TARGET_TOLERANCE_M") == 0)
     {
         candidate.flight.controller.apogee_tolerance_m = value;
+        candidate.flight.controller.mission_tolerance_m = value;
+        candidate.flight.controller.control_deadband_m = value;
     }
     else if (strcmp(key, "MAX_DEPLOY") == 0)
     {
@@ -369,14 +659,23 @@ static bool ambar_set_config_value(const char *key, float value, char *response,
     else if (strcmp(key, "DRAG_MASS_KG") == 0)
     {
         candidate.flight.apogee.vehicle_mass_kg = value;
+        candidate.flight.apogee.coast_mass_kg = value;
     }
     else if (strcmp(key, "DRAG_AREA_M2") == 0 || strcmp(key, "DRAG_CD_AREA") == 0)
     {
         candidate.flight.apogee.drag_area_m2 = value;
+        candidate.flight.apogee.baseline_drag_area_m2 = value;
+        for (uint8_t index = 0U;
+             index < AMBAR_DEPLOYMENT_CDA_POINT_COUNT;
+             ++index)
+        {
+            candidate.flight.apogee.deployment_drag_area_m2[index] = value;
+        }
     }
     else if (strcmp(key, "DRAG_RHO") == 0)
     {
         candidate.flight.apogee.air_density_kgpm3 = value;
+        candidate.flight.apogee.sea_level_air_density_kgpm3 = value;
     }
     else if (strcmp(key, "EFFECTIVENESS") == 0)
     {
@@ -503,6 +802,46 @@ static HAL_StatusTypeDef ambar_execute_command(const AmbarCommandResult_t *comma
         break;
 
     case AMBAR_COMMAND_ARM:
+#if AMBAR_BUILD_IS_VARIABLE_HIL
+    {
+        const AmbarVariableHilArmInputs_t inputs = {
+            .simulation_active = s_simulation_active,
+            .simulation_sample_valid = s_simulation_sample_valid,
+            .simulation_stale = s_simulation_stale,
+            .simulation_sample_age_ms =
+                (uint32_t)(HAL_GetTick() - s_last_simulation_sample_ms),
+            .simulation_timeout_ms = AMBAR_SIMULATION_TIMEOUT_MS,
+            .config_upload_accepted = s_variable_hil_config_uploaded,
+            .actuator_ready = AmbarActuator_IsReadyForFlight(&s_actuator_state)
+        };
+        const AmbarVariableHilArmDecision_t decision =
+            AmbarVariableHilPolicy_CheckArm(&inputs);
+
+        if (decision == AMBAR_VARIABLE_HIL_ARM_BLOCKED_FRESH_SIMULATION)
+        {
+            status = HAL_BUSY;
+            (void)snprintf(response, sizeof(response), "NACK:FRESH_SIM_REQUIRED");
+        }
+        else if (decision == AMBAR_VARIABLE_HIL_ARM_BLOCKED_CONFIG)
+        {
+            status = HAL_BUSY;
+            (void)snprintf(response, sizeof(response), "NACK:VARIABLE_CONFIG_REQUIRED");
+        }
+        else if (decision == AMBAR_VARIABLE_HIL_ARM_BLOCKED_ACTUATOR)
+        {
+            status = HAL_BUSY;
+            s_actuator_state.last_inhibit_flags =
+                s_last_actuator_decision.inhibit_flags;
+            (void)snprintf(response, sizeof(response), "NACK:ACTUATOR_NOT_READY");
+        }
+        else
+        {
+            AmbarFlight_SetArmed(true);
+            (void)snprintf(response, sizeof(response), "ACK:ARM");
+        }
+        break;
+    }
+#else
         if (s_simulation_active && !s_simulation_sample_valid)
         {
             status = HAL_BUSY;
@@ -522,6 +861,7 @@ static HAL_StatusTypeDef ambar_execute_command(const AmbarCommandResult_t *comma
             AmbarFlight_SetArmed(true);
             (void)snprintf(response, sizeof(response), "ACK:ARM");
         }
+#endif
         break;
 
     case AMBAR_COMMAND_DISARM:
@@ -544,7 +884,6 @@ static HAL_StatusTypeDef ambar_execute_command(const AmbarCommandResult_t *comma
         }
         else
         {
-#if AMBAR_FEATURE_EFFECTIVE_BENCH_COMMANDS
             if (AmbarActuator_RequestRetract(&s_actuator_state))
             {
                 (void)snprintf(response, sizeof(response), "ACK:RETRACT");
@@ -554,10 +893,6 @@ static HAL_StatusTypeDef ambar_execute_command(const AmbarCommandResult_t *comma
                 status = HAL_ERROR;
                 (void)snprintf(response, sizeof(response), "NACK:RETRACT");
             }
-#else
-            status = HAL_ERROR;
-            (void)snprintf(response, sizeof(response), "NACK:BENCH_DISABLED");
-#endif
         }
         break;
 
@@ -569,7 +904,6 @@ static HAL_StatusTypeDef ambar_execute_command(const AmbarCommandResult_t *comma
         }
         else
         {
-#if AMBAR_FEATURE_EFFECTIVE_BENCH_COMMANDS
             if (AmbarActuator_RequestHome(&s_actuator_state))
             {
                 (void)snprintf(response, sizeof(response), "ACK:HOME");
@@ -579,10 +913,6 @@ static HAL_StatusTypeDef ambar_execute_command(const AmbarCommandResult_t *comma
                 status = HAL_ERROR;
                 (void)snprintf(response, sizeof(response), "NACK:HOME_INHIBITED");
             }
-#else
-            status = HAL_ERROR;
-            (void)snprintf(response, sizeof(response), "NACK:BENCH_DISABLED");
-#endif
         }
         break;
 
@@ -1032,6 +1362,7 @@ static void ambar_usb_send_actuator_status(void)
     {
         payload.flags |= ROCKET_ACTUATOR_FLAG_MANUAL_PENDING;
     }
+    payload.reserved = AmbarActuator_GetProtocolStatus(&s_actuator_state);
 
     const size_t length = RocketProtocol_EncodeActuatorStatusPayload(encoded,
                                                                       sizeof(encoded),
@@ -1044,6 +1375,106 @@ static void ambar_usb_send_actuator_status(void)
                                    HAL_GetTick());
     }
 }
+
+#if AMBAR_BUILD_IS_VARIABLE_HIL
+static bool ambar_usb_send_variable_hil_config(uint16_t request_sequence)
+{
+    uint8_t encoded[ROCKET_VARIABLE_HIL_CONFIG_PAYLOAD_SIZE];
+    if (RocketProtocol_EncodeVariableHilConfigPayload(encoded,
+                                                       sizeof(encoded),
+                                                       &s_variable_hil_config)
+        != sizeof(encoded))
+    {
+        return false;
+    }
+    return AmbarUsb_QueueCorrelatedPacket(ROCKET_PKT_VARIABLE_HIL_CONFIG,
+                                          request_sequence,
+                                          encoded,
+                                          sizeof(encoded),
+                                          HAL_GetTick());
+}
+
+static bool ambar_usb_send_variable_hil_state(void)
+{
+    const uint32_t now = HAL_GetTick();
+    const AmbarFlightOutput_t output = AmbarFlight_GetOutput();
+    RocketVariableHilStatePayload payload;
+    uint8_t encoded[ROCKET_VARIABLE_HIL_STATE_PAYLOAD_SIZE];
+
+    memset(&payload, 0, sizeof(payload));
+    payload.simulation_sequence = s_last_simulation_sequence;
+    payload.controller_fraction_u16 =
+        ambar_variable_hil_fraction_u16(output.airbrake_command.deploy_fraction);
+    payload.actuator_target_fraction_u16 =
+        ambar_variable_hil_fraction_u16_from_steps(
+            s_last_actuator_decision.target_position_steps);
+    payload.xactual_fraction_u16 =
+        ambar_variable_hil_fraction_u16_from_steps(
+            s_actuator_state.actual_position_steps);
+    payload.target_steps = s_last_actuator_decision.target_position_steps;
+    payload.actual_steps = s_actuator_state.actual_position_steps;
+    payload.flight_inhibit_flags = output.airbrake_command.inhibit_flags;
+    payload.actuator_inhibit_flags = s_last_actuator_decision.inhibit_flags;
+    payload.driver_status = s_actuator_state.last_driver_status;
+    payload.config_crc32 = s_variable_hil_config_crc32;
+    payload.closed_predicted_apogee_dm =
+        ambar_s32_from_float(output.closed_predicted_apogee_m, 10.0f);
+    payload.full_predicted_apogee_dm =
+        ambar_s32_from_float(output.full_predicted_apogee_m, 10.0f);
+    payload.phase = (uint8_t)output.phase;
+    payload.machine_state = (uint8_t)s_actuator_state.machine_state;
+    payload.feedback_source = ROCKET_VARIABLE_HIL_FEEDBACK_TMC5240_XACTUAL;
+    if (s_actuator_state.motor_driver_ok)
+    {
+        payload.state_flags |= ROCKET_VARIABLE_HIL_FLAG_DRIVER_OK;
+    }
+    if (s_actuator_state.driver_enabled)
+    {
+        payload.state_flags |= ROCKET_VARIABLE_HIL_FLAG_DRIVER_ENABLED;
+    }
+    if (s_actuator_state.config_valid && s_variable_hil_config_uploaded)
+    {
+        payload.state_flags |= ROCKET_VARIABLE_HIL_FLAG_CONFIG_VALID;
+    }
+    if (s_simulation_active)
+    {
+        payload.state_flags |= ROCKET_VARIABLE_HIL_FLAG_SIM_ACTIVE;
+    }
+    if (s_simulation_active
+        && s_simulation_sample_valid
+        && !s_simulation_stale
+        && (uint32_t)(now - s_last_simulation_sample_ms)
+               <= AMBAR_SIMULATION_TIMEOUT_MS)
+    {
+        payload.state_flags |= ROCKET_VARIABLE_HIL_FLAG_SIM_FRESH;
+    }
+    if (output.armed)
+    {
+        payload.state_flags |= ROCKET_VARIABLE_HIL_FLAG_ARMED;
+    }
+    if (s_actuator_state.home_limit_active != 0U)
+    {
+        payload.state_flags |= ROCKET_VARIABLE_HIL_FLAG_SOFTWARE_HOME;
+    }
+    if (output.target_reachable)
+    {
+        payload.state_flags |= ROCKET_VARIABLE_HIL_FLAG_TARGET_REACHABLE;
+    }
+
+    if (RocketProtocol_EncodeVariableHilStatePayload(encoded,
+                                                       sizeof(encoded),
+                                                       &payload)
+        != sizeof(encoded))
+    {
+        return false;
+    }
+    return AmbarUsb_QueueCorrelatedPacket(ROCKET_PKT_VARIABLE_HIL_STATE,
+                                          s_last_simulation_sequence,
+                                          encoded,
+                                          sizeof(encoded),
+                                          now);
+}
+#endif
 
 static void ambar_usb_send_heartbeat(void)
 {
@@ -1284,6 +1715,18 @@ static void ambar_usb_process_command(const RocketDecodedPacket *packet)
         {
             result = ROCKET_ACK_BUSY;
         }
+#if AMBAR_BUILD_IS_VARIABLE_HIL
+        else if (command.payload[0] != 0U
+                 && (!s_simulation_active
+                     || s_simulation_stale
+                     || (uint32_t)(HAL_GetTick() - s_last_simulation_sample_ms)
+                            > AMBAR_SIMULATION_TIMEOUT_MS
+                     || !s_variable_hil_config_uploaded))
+        {
+            result = ROCKET_ACK_BUSY;
+            detail = !s_variable_hil_config_uploaded ? 0xC001U : 0xC002U;
+        }
+#endif
         else
         {
             request.action = command.payload[0] != 0U
@@ -1313,11 +1756,25 @@ static void ambar_usb_process_command(const RocketDecodedPacket *packet)
 
     case ROCKET_CMD_HOME:
     case ROCKET_CMD_RETRACT:
+        if (command.payload_length != 0U)
+        {
+            result = ROCKET_ACK_BAD_LENGTH;
+        }
+        else if (AmbarFlight_IsArmed())
+        {
+            result = ROCKET_ACK_BUSY;
+        }
+        else
+        {
+            request.action = command.command == ROCKET_CMD_HOME
+                ? AMBAR_COMMAND_HOME
+                : AMBAR_COMMAND_RETRACT;
+            execute_app_command = true;
+        }
+        break;
+
     case ROCKET_CMD_BENCH_MOVE_STEPS:
-        if ((command.command == ROCKET_CMD_BENCH_MOVE_STEPS
-             && command.payload_length != 4U)
-            || (command.command != ROCKET_CMD_BENCH_MOVE_STEPS
-                && command.payload_length != 0U))
+        if (command.payload_length != 4U)
         {
             result = ROCKET_ACK_BAD_LENGTH;
         }
@@ -1328,23 +1785,15 @@ static void ambar_usb_process_command(const RocketDecodedPacket *packet)
 #if AMBAR_FEATURE_EFFECTIVE_BENCH_COMMANDS
         else
         {
-            request.action = command.command == ROCKET_CMD_HOME
-                ? AMBAR_COMMAND_HOME
-                : (command.command == ROCKET_CMD_RETRACT
-                    ? AMBAR_COMMAND_RETRACT
-                    : AMBAR_COMMAND_BENCH_MOVE);
-            if (command.command == ROCKET_CMD_BENCH_MOVE_STEPS)
-            {
-                request.steps = RocketProtocol_ReadI32(command.payload);
-            }
+            request.action = AMBAR_COMMAND_BENCH_MOVE;
+            request.steps = RocketProtocol_ReadI32(command.payload);
             execute_app_command = true;
         }
 #else
         else
         {
             result = ROCKET_ACK_UNSUPPORTED;
-            detail = (uint16_t)(AMBAR_ACTUATOR_INHIBIT_BUILD_FLAG
-                                | AMBAR_ACTUATOR_INHIBIT_BENCH_FLAG);
+            detail = AMBAR_ACTUATOR_INHIBIT_BENCH_FLAG;
         }
 #endif
         break;
@@ -1398,9 +1847,14 @@ static void ambar_usb_process_command(const RocketDecodedPacket *packet)
             (void)AmbarActuator_StopAndCancel(&s_actuator_state);
             s_simulation_active = true;
             s_simulation_sample_valid = false;
+            s_simulation_imu_pending = false;
             s_simulation_barometer_pending = false;
             s_simulation_stale = false;
             s_last_simulation_sample_ms = HAL_GetTick();
+#if AMBAR_BUILD_IS_VARIABLE_HIL
+            s_variable_hil_state_pending = false;
+            s_last_simulation_sequence = 0U;
+#endif
             AmbarFlight_SetArmed(false);
             AmbarFlight_ResetOnPad((float)HAL_GetTick() * 0.001f);
             s_usb_pending_message = ROCKET_MSG_SIMULATION_STARTED;
@@ -1418,6 +1872,10 @@ static void ambar_usb_process_command(const RocketDecodedPacket *packet)
 #if AMBAR_FEATURE_EFFECTIVE_SIMULATION
         if (command.payload_length == 0U)
         {
+#if AMBAR_BUILD_IS_VARIABLE_HIL
+            ambar_variable_hil_shutdown(
+                AMBAR_VARIABLE_HIL_SHUTDOWN_SIM_STOP);
+#else
             s_simulation_active = false;
             s_simulation_sample_valid = false;
             s_simulation_barometer_pending = false;
@@ -1425,6 +1883,7 @@ static void ambar_usb_process_command(const RocketDecodedPacket *packet)
             AmbarFlight_SetArmed(false);
             (void)AmbarActuator_StopAndCancel(&s_actuator_state);
             AmbarFlight_ResetOnPad((float)HAL_GetTick() * 0.001f);
+#endif
             s_usb_pending_message = ROCKET_MSG_SIMULATION_STOPPED;
         }
         else
@@ -1433,6 +1892,113 @@ static void ambar_usb_process_command(const RocketDecodedPacket *packet)
         }
 #else
         result = ROCKET_ACK_UNSUPPORTED;
+#endif
+        break;
+
+    case ROCKET_CMD_HIL_SET_OVERRIDE:
+#if AMBAR_FEATURE_EFFECTIVE_HIL_OVERRIDE
+        if (command.payload_length != 1U)
+        {
+            result = ROCKET_ACK_BAD_LENGTH;
+        }
+        else if (command.payload[0] > ROCKET_HIL_OVERRIDE_FORCE_HOME)
+        {
+            result = ROCKET_ACK_BAD_VALUE;
+            detail = command.payload[0];
+        }
+        else if (command.payload[0] == ROCKET_HIL_OVERRIDE_OFF)
+        {
+            if (!AmbarActuator_SetHilOverride(
+                    &s_actuator_state,
+                    AMBAR_ACTUATOR_HIL_OVERRIDE_OFF))
+            {
+                result = ROCKET_ACK_EXECUTION_ERROR;
+                detail = (uint16_t)(s_actuator_state.last_inhibit_flags
+                                    & 0xFFFFU);
+            }
+        }
+        else if (!s_simulation_active
+                 || !s_simulation_sample_valid
+                 || s_simulation_stale
+                 || (uint32_t)(HAL_GetTick() - s_last_simulation_sample_ms)
+                        > AMBAR_SIMULATION_TIMEOUT_MS
+                 || !AmbarFlight_IsArmed()
+                 || !s_actuator_state.motor_driver_ok
+                 || !s_actuator_state.config_valid
+                 || !s_actuator_state.homed
+                 || s_actuator_state.fault_latched
+                 || s_actuator_state.estop_latched)
+        {
+            result = ROCKET_ACK_BUSY;
+            detail = (uint16_t)(s_actuator_state.last_inhibit_flags
+                                & 0xFFFFU);
+        }
+        else if (!AmbarActuator_SetHilOverride(
+                     &s_actuator_state,
+                     (AmbarActuatorHilOverride_t)command.payload[0]))
+        {
+            result = ROCKET_ACK_EXECUTION_ERROR;
+            detail = (uint16_t)(s_actuator_state.last_inhibit_flags
+                                & 0xFFFFU);
+        }
+        else
+        {
+            detail = AmbarActuator_GetProtocolStatus(&s_actuator_state);
+        }
+#else
+        result = ROCKET_ACK_UNSUPPORTED;
+        detail = AMBAR_ACTUATOR_INHIBIT_HIL_PROFILE;
+#endif
+        break;
+
+    case ROCKET_CMD_VARIABLE_HIL_GET_CONFIG:
+#if AMBAR_BUILD_IS_VARIABLE_HIL
+        if (command.payload_length != 0U)
+        {
+            result = ROCKET_ACK_BAD_LENGTH;
+        }
+        else if (!ambar_usb_send_variable_hil_config(packet->header.sequence))
+        {
+            result = ROCKET_ACK_BUSY;
+        }
+#else
+        result = ROCKET_ACK_UNSUPPORTED;
+#endif
+        break;
+
+    case ROCKET_CMD_RECOVER_KNOWN_FULL_RETRACT:
+#if AMBAR_BUILD_IS_CONTINUOUS_HIL
+        if (command.payload_length != ROCKET_RECOVER_KNOWN_FULL_PAYLOAD_SIZE)
+        {
+            result = ROCKET_ACK_BAD_LENGTH;
+        }
+        else if (RocketProtocol_ReadU32(command.payload)
+                 != ROCKET_RECOVER_KNOWN_FULL_MAGIC)
+        {
+            result = ROCKET_ACK_BAD_VALUE;
+            detail = 0xF001U;
+        }
+        else if (AmbarFlight_IsArmed()
+                 || s_simulation_active
+                 || s_simulation_sample_valid
+                 || s_actuator_state.driver_enabled)
+        {
+            result = ROCKET_ACK_BUSY;
+            detail = (uint16_t)(s_actuator_state.last_inhibit_flags & 0xFFFFU);
+        }
+        else if (!AmbarActuator_RequestKnownFullRecoveryRetract(
+                      &s_actuator_state))
+        {
+            result = ROCKET_ACK_EXECUTION_ERROR;
+            detail = (uint16_t)(s_actuator_state.last_inhibit_flags & 0xFFFFU);
+        }
+        else
+        {
+            detail = AmbarActuator_GetProtocolStatus(&s_actuator_state);
+        }
+#else
+        result = ROCKET_ACK_UNSUPPORTED;
+        detail = AMBAR_ACTUATOR_INHIBIT_HIL_PROFILE;
 #endif
         break;
 
@@ -1514,8 +2080,108 @@ static void ambar_usb_process_command(const RocketDecodedPacket *packet)
                                &command);
 }
 
+static void ambar_usb_process_variable_hil_config(
+    const RocketDecodedPacket *packet)
+{
+    RocketAckCode result = ROCKET_ACK_OK;
+    uint16_t detail = 0U;
+
+#if AMBAR_BUILD_IS_VARIABLE_HIL
+    RocketVariableHilConfigPayload candidate;
+    RocketVariableHilConfigPayload canonical;
+    uint8_t canonical_bytes[ROCKET_VARIABLE_HIL_CONFIG_PAYLOAD_SIZE];
+    uint32_t invalid_flags = 0UL;
+    AmbarFlightConfig_t previous_config;
+    AmbarFlight_GetConfigSnapshot(&previous_config);
+
+    if (packet == NULL
+        || !RocketProtocol_DecodeVariableHilConfigPayload(
+            packet->payload, packet->payload_length, &candidate))
+    {
+        result = ROCKET_ACK_BAD_LENGTH;
+        detail = packet != NULL ? packet->payload_length : 0U;
+    }
+    else if (AmbarFlight_IsArmed()
+             || s_simulation_active
+             || s_actuator_state.driver_enabled
+             || ambar_actuator_motion_active())
+    {
+        result = ROCKET_ACK_BUSY;
+        detail = 0xC010U;
+    }
+    else if (candidate.schema_version != ROCKET_VARIABLE_HIL_CONFIG_VERSION
+             || candidate.cda_point_count != ROCKET_VARIABLE_HIL_CDA_POINT_COUNT)
+    {
+        result = ROCKET_ACK_BAD_VALUE;
+        detail = ((uint16_t)candidate.schema_version << 8U)
+               | candidate.cda_point_count;
+    }
+    else if (candidate.config_crc32
+             != AmbarConfig_Crc32(packet->payload,
+                                  ROCKET_VARIABLE_HIL_CONFIG_PAYLOAD_SIZE - 4U))
+    {
+        result = ROCKET_ACK_BAD_CRC;
+        detail = (uint16_t)(candidate.config_crc32 & 0xFFFFU);
+    }
+    else if (!ambar_variable_hil_apply_config(&candidate, &invalid_flags))
+    {
+        result = ROCKET_ACK_BAD_VALUE;
+        detail = (uint16_t)(invalid_flags & 0xFFFFU);
+    }
+    else
+    {
+        AmbarFlightConfig_t applied;
+        AmbarFlight_GetConfigSnapshot(&applied);
+        if (!ambar_variable_hil_encode_config(&applied,
+                                               &canonical,
+                                               canonical_bytes)
+            || memcmp(canonical_bytes,
+                      packet->payload,
+                      ROCKET_VARIABLE_HIL_CONFIG_PAYLOAD_SIZE) != 0)
+        {
+            result = ROCKET_ACK_EXECUTION_ERROR;
+            detail = 0xC011U;
+            s_variable_hil_config_uploaded = false;
+            /* Preserve all-or-nothing upload semantics on any echo mismatch. */
+            if (!AmbarFlight_ApplyControlConfig(&previous_config.controller,
+                                                &previous_config.apogee,
+                                                NULL))
+            {
+                detail = 0xC013U;
+            }
+            s_config.flight.controller = previous_config.controller;
+            s_config.flight.apogee = previous_config.apogee;
+            ambar_refresh_config_crc(&s_config);
+        }
+        else
+        {
+            s_variable_hil_config = canonical;
+            s_variable_hil_config_crc32 = canonical.config_crc32;
+            s_variable_hil_config_uploaded = true;
+            s_usb_pending_message = ROCKET_MSG_CONFIG_APPLIED;
+            if (!ambar_usb_send_variable_hil_config(packet->header.sequence))
+            {
+                result = ROCKET_ACK_BUSY;
+                detail = 0xC012U;
+            }
+        }
+    }
+#else
+    (void)packet;
+    result = ROCKET_ACK_UNSUPPORTED;
+#endif
+
+    ambar_usb_complete_command(
+        packet != NULL ? packet->header.sequence : 0U,
+        ROCKET_CMD_VARIABLE_HIL_CONFIG_UPLOAD,
+        result,
+        detail,
+        NULL);
+}
+
 /* -------------------- Time-bounded simulation input service ([ARCH-3]) -------------------- */
 
+#if AMBAR_FEATURE_EFFECTIVE_SIMULATION
 static bool ambar_usb_simulation_value_valid(const RocketSimulationPayload *sample)
 {
     const uint16_t known_flags = ROCKET_SIM_FLAG_ALTITUDE_VALID
@@ -1555,6 +2221,7 @@ static bool ambar_usb_simulation_value_valid(const RocketSimulationPayload *samp
     }
     return sample->barometer_stddev_cm <= 10000U;
 }
+#endif
 
 static void ambar_usb_process_simulation(const RocketDecodedPacket *packet)
 {
@@ -1572,22 +2239,33 @@ static void ambar_usb_process_simulation(const RocketDecodedPacket *packet)
 
     if ((sample.flags & ROCKET_SIM_FLAG_END_OF_STREAM) != 0U)
     {
+#if AMBAR_BUILD_IS_VARIABLE_HIL
+        ambar_variable_hil_shutdown(
+            AMBAR_VARIABLE_HIL_SHUTDOWN_END_OF_STREAM);
+#else
         s_simulation_active = false;
         s_simulation_sample_valid = false;
+        s_simulation_imu_pending = false;
         s_simulation_barometer_pending = false;
         s_simulation_stale = false;
         AmbarFlight_SetArmed(false);
         (void)AmbarActuator_StopAndCancel(&s_actuator_state);
         AmbarFlight_ResetOnPad((float)HAL_GetTick() * 0.001f);
+#endif
         s_usb_pending_message = ROCKET_MSG_SIMULATION_STOPPED;
         return;
     }
 
     s_simulation_sample = sample;
     s_simulation_sample_valid = true;
+    s_simulation_imu_pending = true;
     s_simulation_barometer_pending = true;
     s_simulation_stale = false;
     s_last_simulation_sample_ms = HAL_GetTick();
+#if AMBAR_BUILD_IS_VARIABLE_HIL
+    s_last_simulation_sequence = packet->header.sequence;
+    s_variable_hil_state_pending = true;
+#endif
 #else
     (void)packet;
 #endif
@@ -1605,7 +2283,24 @@ static void ambar_usb_service_received_packets(void)
         }
         else if (packet.header.type == ROCKET_PKT_SIMULATION)
         {
+#if AMBAR_BUILD_IS_VARIABLE_HIL
+            if (!s_variable_hil_state_pending)
+            {
+                ambar_usb_process_simulation(&packet);
+            }
+            /*
+             * One accepted simulation packet produces exactly one state reply.
+             * A second frame cannot replace an outstanding causal sequence; the
+             * host will retain the last confirmed fraction and fault on timeout.
+             */
+            break;
+#else
             ambar_usb_process_simulation(&packet);
+#endif
+        }
+        else if (packet.header.type == ROCKET_PKT_VARIABLE_HIL_CONFIG_UPLOAD)
+        {
+            ambar_usb_process_variable_hil_config(&packet);
         }
     }
 }
@@ -1616,6 +2311,10 @@ static void ambar_check_simulation_timeout(uint32_t now)
     if (s_simulation_active
         && (uint32_t)(now - s_last_simulation_sample_ms) > AMBAR_SIMULATION_TIMEOUT_MS)
     {
+#if AMBAR_BUILD_IS_VARIABLE_HIL
+        ambar_variable_hil_shutdown(
+            AMBAR_VARIABLE_HIL_SHUTDOWN_STALE_INPUT);
+#else
         s_simulation_active = false;
         s_simulation_sample_valid = false;
         s_simulation_barometer_pending = false;
@@ -1623,6 +2322,7 @@ static void ambar_check_simulation_timeout(uint32_t now)
         AmbarFlight_SetArmed(false);
         (void)AmbarActuator_StopAndCancel(&s_actuator_state);
         AmbarFlight_ResetOnPad((float)HAL_GetTick() * 0.001f);
+#endif
         s_usb_pending_message = ROCKET_MSG_SIMULATION_STALE;
         s_usb_snapshot_requested = true;
     }
@@ -1633,6 +2333,7 @@ static void ambar_check_simulation_timeout(uint32_t now)
 
 /* -------------------- Radio extras and persistent log snapshots ([ARCH-6], [ARCH-7]) -------------------- */
 
+#if AMBAR_FEATURE_EFFECTIVE_TELEMETRY
 static AmbarTelemetryExtra_t ambar_build_telemetry_extra(const AmbarFlightOutput_t *output,
                                                          const AmbarActuatorDecision_t *decision)
 {
@@ -1671,6 +2372,7 @@ static AmbarTelemetryExtra_t ambar_build_telemetry_extra(const AmbarFlightOutput
 
     return extra;
 }
+#endif
 
 #if AMBAR_FEATURE_FLASH_LOGGING
 static void ambar_append_log_snapshot(const AmbarFlightOutput_t *output,
@@ -1741,9 +2443,15 @@ void AmbarApp_Init(HAL_StatusTypeDef sensor_status,
     s_usb_pending_message = ROCKET_MSG_NONE;
     s_simulation_active = false;
     s_simulation_sample_valid = false;
+    s_simulation_imu_pending = false;
     s_simulation_barometer_pending = false;
     s_simulation_stale = false;
     s_last_simulation_sample_ms = 0U;
+    s_last_simulation_sequence = 0U;
+    s_variable_hil_state_pending = false;
+    s_variable_hil_config_uploaded = false;
+    s_variable_hil_config_crc32 = 0UL;
+    memset(&s_variable_hil_config, 0, sizeof(s_variable_hil_config));
 
     s_actuator_state = AmbarActuator_DefaultState();
     s_actuator_state.motor_driver_ok = motor_driver_ok != 0U;
@@ -1791,9 +2499,9 @@ void AmbarApp_Init(HAL_StatusTypeDef sensor_status,
         s_log_status = HAL_OK;
 #endif
     }
-#if AMBAR_FEATURE_PRESENTATION_MOTION
+#if AMBAR_ACTUATOR_USE_PROTOTYPE_PROFILE
     /*
-     * A presentation-motion heartbeat is a promise that the actuator uses the
+     * The build identity is a promise that both profiles use the reviewed
      * reviewed 153600-count prototype profile. Do not let an older/saved bench
      * actuator block silently change travel, direction, current, or ramp values.
      * Flight/EKF settings from flash remain available.
@@ -1801,7 +2509,36 @@ void AmbarApp_Init(HAL_StatusTypeDef sensor_status,
     s_config.actuator = AmbarActuator_DefaultConfig();
     ambar_refresh_config_crc(&s_config);
 #endif
+#if AMBAR_BUILD_IS_VARIABLE_HIL
+    /*
+     * VARIABLE_HIL is an explicit provisional M5 profile, not a reinterpretation
+     * of a saved NORMAL controller.  The versioned USB payload intentionally
+     * changes only controller/predictor tuning, so install the M5 phase block
+     * here as well (including its 1.80 s boost safety dwell) before any upload.
+     * This is RAM-only and never rewrites the operator's persistent record.
+     */
+    {
+        const AmbarFlightConfig_t m5 = AmbarFlight_M5VariableHilConfig();
+        s_config.flight.phase = m5.phase;
+        s_config.flight.controller = m5.controller;
+        s_config.flight.apogee = m5.apogee;
+        ambar_refresh_config_crc(&s_config);
+    }
+#endif
     ambar_apply_runtime_config(0U);
+#if AMBAR_BUILD_IS_VARIABLE_HIL
+    {
+        AmbarFlightConfig_t active_config;
+        uint8_t encoded_config[ROCKET_VARIABLE_HIL_CONFIG_PAYLOAD_SIZE];
+        AmbarFlight_GetConfigSnapshot(&active_config);
+        if (ambar_variable_hil_encode_config(&active_config,
+                                              &s_variable_hil_config,
+                                              encoded_config))
+        {
+            s_variable_hil_config_crc32 = s_variable_hil_config.config_crc32;
+        }
+    }
+#endif
 
     if (sensor_status == HAL_OK)
     {
@@ -1854,8 +2591,15 @@ void AmbarApp_Task(void)
         {
             s_usb_event_state_valid = false;
             ambar_usb_reset_command_cache();
-#if AMBAR_FEATURE_ACTUATOR
-            /* A lost presentation USB session is always an energy-off stop. */
+#if AMBAR_BUILD_IS_VARIABLE_HIL
+            ambar_variable_hil_shutdown(
+                AMBAR_VARIABLE_HIL_SHUTDOWN_USB_LOSS);
+#elif AMBAR_BUILD_IS_CONTINUOUS_HIL && AMBAR_FEATURE_ACTUATOR
+            /*
+             * HIL motion authority exists only while the sole host connection
+             * is present. NORMAL treats USB telemetry as fail-soft and keeps
+             * the autonomous flight path independent of a ground disconnect.
+            */
             AmbarFlight_SetArmed(false);
             (void)AmbarActuator_StopAndCancel(&s_actuator_state);
 #endif
@@ -1881,6 +2625,7 @@ void AmbarApp_Task(void)
     }
 #endif
 
+#if !AMBAR_BUILD_IS_VARIABLE_HIL
     {
         /*
          * The actuator sees the complete flight snapshot. A healthy, armed
@@ -1891,9 +2636,29 @@ void AmbarApp_Task(void)
         const AmbarFlightOutput_t actuator_output = AmbarFlight_GetOutput();
         s_last_actuator_decision = AmbarActuator_Task(&s_actuator_state, &actuator_output);
     }
+#else
+    {
+        float actual_fraction = 0.0f;
+        const bool feedback_valid = s_actuator_state.motor_driver_ok
+            && !s_actuator_state.fault_latched
+            && ambar_variable_hil_fraction_from_steps(
+                s_actuator_state.actual_position_steps,
+                &actual_fraction);
+        AmbarFlight_SetActuatorFraction(actual_fraction, feedback_valid);
+    }
+#endif
 
-    if (RocketSensors_ConsumeImuDataReady()
-        || (uint32_t)(now - s_last_imu_ms) >= AMBAR_IMU_PERIOD_MS)
+    if (
+#if AMBAR_BUILD_IS_VARIABLE_HIL
+        (s_simulation_active && s_simulation_imu_pending)
+        || (!s_simulation_active
+            && (RocketSensors_ConsumeImuDataReady()
+                || (uint32_t)(now - s_last_imu_ms) >= AMBAR_IMU_PERIOD_MS))
+#else
+        RocketSensors_ConsumeImuDataReady()
+        || (uint32_t)(now - s_last_imu_ms) >= AMBAR_IMU_PERIOD_MS
+#endif
+       )
     {
         /*
          * A valid pad-zeroed vertical acceleration sample advances the EKF.  A
@@ -1904,6 +2669,9 @@ void AmbarApp_Task(void)
 #if AMBAR_FEATURE_EFFECTIVE_SIMULATION
         if (s_simulation_active)
         {
+#if AMBAR_BUILD_IS_VARIABLE_HIL
+            s_simulation_imu_pending = false;
+#endif
             if (s_simulation_sample_valid
                 && (s_simulation_sample.flags
                     & ROCKET_SIM_FLAG_ACCELERATION_VALID) != 0U)
@@ -1940,7 +2708,12 @@ void AmbarApp_Task(void)
     }
 
     if (RocketSensors_ConsumeBarometerDataReady()
-        || (uint32_t)(now - s_last_baro_ms) >= AMBAR_BARO_PERIOD_MS)
+        || (uint32_t)(now - s_last_baro_ms) >= AMBAR_BARO_PERIOD_MS
+#if AMBAR_BUILD_IS_VARIABLE_HIL
+        /* Consume each causal host sample immediately, independent of tick phase. */
+        || (s_simulation_active && s_simulation_barometer_pending)
+#endif
+        )
     {
         /*
          * The barometer path returns altitude above the pad.  The EKF applies
@@ -1995,11 +2768,40 @@ void AmbarApp_Task(void)
         }
     }
 
+#if AMBAR_BUILD_IS_VARIABLE_HIL
+    {
+        /*
+         * VARIABLE_HIL consumes the accepted sensor sample first, then maps the
+         * resulting controller fraction through the normal actuator authority.
+         * This keeps NORMAL/CONTINUOUS_HIL scheduling unchanged while making the
+         * causal reply correspond to the just-consumed simulation sequence.
+         */
+        const AmbarFlightOutput_t actuator_output = AmbarFlight_GetOutput();
+        s_last_actuator_decision =
+            AmbarActuator_Task(&s_actuator_state, &actuator_output);
+    }
+#endif
+
 #if AMBAR_FEATURE_USB_PROTOCOL
     if (s_usb_initialized && AmbarUsb_IsConfigured())
     {
-        if (s_usb_snapshot_requested
-            || (uint32_t)(now - s_last_usb_telemetry_ms) >= AMBAR_USB_TELEMETRY_PERIOD_MS)
+#if AMBAR_BUILD_IS_VARIABLE_HIL
+        if (s_variable_hil_state_pending
+            && !s_simulation_imu_pending
+            && !s_simulation_barometer_pending
+            && ambar_usb_send_variable_hil_state())
+        {
+            s_variable_hil_state_pending = false;
+        }
+#endif
+        if (
+#if AMBAR_BUILD_IS_VARIABLE_HIL
+            !s_simulation_active
+            &&
+#endif
+            (s_usb_snapshot_requested
+             || (uint32_t)(now - s_last_usb_telemetry_ms)
+                    >= AMBAR_USB_TELEMETRY_PERIOD_MS))
         {
             uint8_t message = ROCKET_MSG_NONE;
             if (s_usb_snapshot_requested)
@@ -2013,13 +2815,24 @@ void AmbarApp_Task(void)
             ambar_usb_send_telemetry(message);
         }
 
-        if ((uint32_t)(now - s_last_usb_actuator_ms) >= AMBAR_USB_ACTUATOR_PERIOD_MS)
+        if (
+#if AMBAR_BUILD_IS_VARIABLE_HIL
+            !s_simulation_active
+            &&
+#endif
+            (uint32_t)(now - s_last_usb_actuator_ms)
+                >= AMBAR_USB_ACTUATOR_PERIOD_MS)
         {
             s_last_usb_actuator_ms = now;
             ambar_usb_send_actuator_status();
         }
 
-        if ((uint32_t)(now - s_last_usb_heartbeat_ms) >= AMBAR_USB_HEARTBEAT_PERIOD_MS)
+        if (
+#if AMBAR_BUILD_IS_VARIABLE_HIL
+            !s_simulation_active
+            &&
+#endif
+            (uint32_t)(now - s_last_usb_heartbeat_ms) >= AMBAR_USB_HEARTBEAT_PERIOD_MS)
         {
             s_last_usb_heartbeat_ms = now;
             ambar_usb_send_heartbeat();

@@ -45,6 +45,67 @@ STANDARD_GRAVITY_MPS2 = 9.80665
 BRIDGE_RESPONSE_TIMEOUT_S = 2.0
 
 
+def plant_airbrake_drag_coefficient(
+    config: dict[str, Any], deployment: float, mach: float
+) -> float:
+    """Map the versioned total-CdA stations to RocketPy incremental Cd.
+
+    Calibration version zero retains the legacy linear 0.95-style model.  The
+    explicit M5 profile instead subtracts fitted baseline CdA and divides by the
+    same frontal reference area used for the fitted rocket Cd.
+    """
+    airbrakes = config["airbrakes"]
+    predictor = config.get("predictor", {})
+    if int(predictor.get("calibration_version", 0)) == 0:
+        return (
+            float(airbrakes["drag_coefficient_at_full_deployment"])
+            * deployment
+            * (
+                1.0
+                + float(airbrakes["mach_drag_multiplier_at_mach_1"])
+                * min(max(mach, 0.0), 1.0)
+            )
+        )
+
+    fractions = predictor["deployment_fractions"]
+    total_cda = predictor["deployment_drag_area_m2"]
+    bounded = min(max(float(deployment), 0.0), 1.0)
+    upper_index = next(
+        (index for index, fraction in enumerate(fractions) if fraction >= bounded),
+        len(fractions) - 1,
+    )
+    lower_index = max(0, upper_index - 1)
+    lower_fraction = float(fractions[lower_index])
+    upper_fraction = float(fractions[upper_index])
+    if upper_fraction <= lower_fraction:
+        interpolated_cda = float(total_cda[upper_index])
+    else:
+        local = (bounded - lower_fraction) / (upper_fraction - lower_fraction)
+        interpolated_cda = float(total_cda[lower_index]) + local * (
+            float(total_cda[upper_index]) - float(total_cda[lower_index])
+        )
+    incremental_cda = max(
+        0.0, interpolated_cda - float(predictor["baseline_drag_area_m2"])
+    )
+    full_incremental_cda = max(
+        1.0e-12,
+        float(total_cda[-1]) - float(predictor["baseline_drag_area_m2"]),
+    )
+    # Preserve the five-point curve shape while allowing Monte Carlo to vary
+    # plant-only full authority without leaking that sampled truth into the
+    # controller predictor configuration.
+    coefficient = (
+        incremental_cda
+        / full_incremental_cda
+        * float(airbrakes["drag_coefficient_at_full_deployment"])
+    )
+    return coefficient * (
+        1.0
+        + float(airbrakes["mach_drag_multiplier_at_mach_1"])
+        * min(max(mach, 0.0), 1.0)
+    )
+
+
 @dataclass
 class BridgeState:
     deploy_fraction: float = 0.0
@@ -53,7 +114,12 @@ class BridgeState:
     altitude_m: float = 0.0
     velocity_mps: float = 0.0
     predicted_apogee_m: float = 0.0
+    closed_predicted_apogee_m: float = 0.0
+    full_predicted_apogee_m: float = 0.0
     healthy: bool = True
+    controller_mode_used: int = 0
+    predictive_solution_valid: bool = False
+    target_reachable: bool = False
     phase: str = "PadIdle"
 
 
@@ -133,18 +199,66 @@ class ControllerBridge:
         minimum_boost_time_s: float,
         target_apogee_m: float,
         target_tolerance_m: float,
+        controller_config: dict[str, Any] | None = None,
+        predictor_config: dict[str, Any] | None = None,
     ) -> None:
         self._failure: str | None = None
+        controller_values = controller_config or {}
+        predictor_values = predictor_config or {}
+        cda_points = predictor_values.get(
+            "deployment_drag_area_m2",
+            [0.012, 0.012, 0.012, 0.012, 0.012],
+        )
+        if len(cda_points) != 5:
+            raise ValueError("predictor deployment_drag_area_m2 must contain 5 points")
+        control_mode = 1 if controller_values.get("control_mode") == "predictive" else 0
+        bridge_arguments = [
+            str(executable),
+            "--minimum-boost-time", f"{minimum_boost_time_s:.6f}",
+            "--target-apogee-m", f"{target_apogee_m:.6f}",
+            "--target-tolerance-m", f"{target_tolerance_m:.6f}",
+        ]
+        if controller_config is not None and predictor_config is not None:
+            bridge_arguments.extend(
+                [
+                    "--mission-tolerance-m",
+                    f"{controller_values['mission_tolerance_ft'] * FEET_TO_METERS:.9f}",
+                    "--control-deadband-m",
+                    f"{controller_values['control_deadband_ft'] * FEET_TO_METERS:.9f}",
+                    "--deployment-hysteresis",
+                    f"{controller_values['deployment_hysteresis_fraction']:.9f}",
+                    "--predictive-period-s",
+                    f"{controller_values['predictive_update_period_s']:.9f}",
+                    "--control-mode", str(control_mode),
+                    "--calibration-version", str(predictor_values["calibration_version"]),
+                    "--coast-mass-kg", f"{predictor_values['coast_mass_kg']:.9f}",
+                    "--baseline-cda-m2",
+                    f"{predictor_values['baseline_drag_area_m2']:.9f}",
+                    "--cda-0-m2", f"{cda_points[0]:.9f}",
+                    "--cda-25-m2", f"{cda_points[1]:.9f}",
+                    "--cda-50-m2", f"{cda_points[2]:.9f}",
+                    "--cda-75-m2", f"{cda_points[3]:.9f}",
+                    "--cda-100-m2", f"{cda_points[4]:.9f}",
+                    "--sea-level-density-kgpm3",
+                    f"{predictor_values['sea_level_air_density_kgpm3']:.9f}",
+                    "--density-scale-height-m",
+                    f"{predictor_values['density_scale_height_m']:.6f}",
+                    "--launch-site-elevation-m",
+                    f"{predictor_values['launch_site_elevation_m']:.6f}",
+                    "--predictor-time-step-s",
+                    f"{predictor_values['time_step_s']:.9f}",
+                    "--predictor-max-time-s",
+                    f"{predictor_values['max_predict_time_s']:.6f}",
+                    "--actuator-delay-s",
+                    f"{predictor_values['actuator_delay_s']:.9f}",
+                    "--actuator-open-rate",
+                    f"{predictor_values['actuator_open_rate_fraction_per_s']:.9f}",
+                    "--actuator-close-rate",
+                    f"{predictor_values['actuator_close_rate_fraction_per_s']:.9f}",
+                ]
+            )
         self.process = subprocess.Popen(
-            [
-                str(executable),
-                "--minimum-boost-time",
-                f"{minimum_boost_time_s:.6f}",
-                "--target-apogee-m",
-                f"{target_apogee_m:.6f}",
-                "--target-tolerance-m",
-                f"{target_tolerance_m:.6f}",
-            ],
+            bridge_arguments,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -191,19 +305,36 @@ class ControllerBridge:
         response = response_line.strip()
         if not response.startswith("STATE "):
             raise RuntimeError(f"Controller bridge returned: {response or '<no output>'}")
-        values = response.split(maxsplit=8)
-        if len(values) != 9:
+        values = response.split()
+        if len(values) not in (9, 14):
             raise RuntimeError(f"Controller bridge state is malformed: {response}")
-        self.state = BridgeState(
-            deploy_fraction=float(values[1]),
-            inhibit=values[2] == "1",
-            inhibit_flags=int(values[3]),
-            altitude_m=float(values[4]),
-            velocity_mps=float(values[5]),
-            predicted_apogee_m=float(values[6]),
-            healthy=values[7] == "1",
-            phase=values[8],
-        )
+        if len(values) == 14:
+            self.state = BridgeState(
+                deploy_fraction=float(values[1]),
+                inhibit=values[2] == "1",
+                inhibit_flags=int(values[3]),
+                altitude_m=float(values[4]),
+                velocity_mps=float(values[5]),
+                predicted_apogee_m=float(values[6]),
+                closed_predicted_apogee_m=float(values[7]),
+                full_predicted_apogee_m=float(values[8]),
+                healthy=values[9] == "1",
+                controller_mode_used=int(values[10]),
+                predictive_solution_valid=values[11] == "1",
+                target_reachable=values[12] == "1",
+                phase=values[13],
+            )
+        else:
+            self.state = BridgeState(
+                deploy_fraction=float(values[1]),
+                inhibit=values[2] == "1",
+                inhibit_flags=int(values[3]),
+                altitude_m=float(values[4]),
+                velocity_mps=float(values[5]),
+                predicted_apogee_m=float(values[6]),
+                healthy=values[7] == "1",
+                phase=values[8],
+            )
         return self.state
 
     def step(
@@ -213,26 +344,78 @@ class ControllerBridge:
         altitude_m: float,
         altitude_std_dev_m: float,
         use_barometer: bool,
+        actuator_fraction: float | None = None,
     ) -> BridgeState:
+        actuator_field = (
+            f" {actuator_fraction:.9f}" if actuator_fraction is not None else ""
+        )
         return self._exchange(
             "STEP "
             f"{timestamp_s:.9f} {acceleration_mps2:.9f} {altitude_m:.9f} "
             f"{altitude_std_dev_m:.9f} {1 if use_barometer else 0}"
+            f"{actuator_field}"
         )
 
+    def predict(
+        self,
+        altitude_m: float,
+        velocity_mps: float,
+        current_fraction: float,
+        target_fraction: float,
+    ) -> float:
+        """Evaluate the production pure coast predictor without changing EKF state."""
+        if self.process.stdin is None:
+            raise RuntimeError("Controller bridge pipes are unavailable.")
+        self.process.stdin.write(
+            "PREDICT "
+            f"{altitude_m:.9f} {velocity_mps:.9f} "
+            f"{current_fraction:.9f} {target_fraction:.9f}\n"
+        )
+        self.process.stdin.flush()
+        try:
+            response_line = self._responses.get(timeout=BRIDGE_RESPONSE_TIMEOUT_S)
+        except queue.Empty as error:
+            self._failure = "controller predictor bridge timed out"
+            self.process.kill()
+            self.process.wait(timeout=2)
+            raise TimeoutError(self._failure) from error
+        if response_line is None:
+            self._failure = "controller predictor bridge closed unexpectedly"
+            raise RuntimeError(self._failure)
+        response = response_line.strip().split()
+        if len(response) != 2 or response[0] != "PREDICTION":
+            raise RuntimeError(
+                f"Controller predictor returned: {' '.join(response) or '<no output>'}"
+            )
+        prediction = float(response[1])
+        if not math.isfinite(prediction):
+            raise RuntimeError("Controller predictor returned a non-finite result")
+        return prediction
+
     def close(self) -> None:
-        if self._failure is not None:
-            return
-        if self.process.poll() is None and self.process.stdin is not None:
+        if self.process.poll() is None and self._failure is not None:
+            self.process.kill()
+            self.process.wait(timeout=2)
+        elif self.process.poll() is None and self.process.stdin is not None:
             try:
                 self.process.stdin.write("QUIT\n")
                 self.process.stdin.flush()
                 self.process.wait(timeout=2)
             except (BrokenPipeError, subprocess.TimeoutExpired):
                 self.process.kill()
+                self.process.wait(timeout=2)
+        error = (
+            self.process.stderr.read()
+            if self.process.returncode not in (None, 0) and self.process.stderr
+            else ""
+        )
+        for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
+            if stream is not None and not stream.closed:
+                stream.close()
         if self.process.returncode not in (None, 0):
-            error = self.process.stderr.read() if self.process.stderr else ""
-            raise RuntimeError(f"Controller bridge exited with {self.process.returncode}: {error}")
+            raise RuntimeError(
+                f"Controller bridge exited with {self.process.returncode}: {error}"
+            )
 
 
 def deep_merge(
@@ -418,6 +601,8 @@ def run_closed_loop(
         controller_config["minimum_boost_time_s"],
         controller_config["target_apogee_ft"] * FEET_TO_METERS,
         controller_config["target_tolerance_ft"] * FEET_TO_METERS,
+        controller_config=controller_config,
+        predictor_config=config["predictor"],
     )
     log: list[dict[str, Any]] = []
     previous_time: float | None = None
@@ -480,6 +665,11 @@ def run_closed_loop(
                     "estimated_altitude_m": bridge.state.altitude_m,
                     "estimated_velocity_mps": bridge.state.velocity_mps,
                     "predicted_apogee_m": bridge.state.predicted_apogee_m,
+                    "closed_predicted_apogee_m": bridge.state.closed_predicted_apogee_m,
+                    "full_predicted_apogee_m": bridge.state.full_predicted_apogee_m,
+                    "controller_mode_used": bridge.state.controller_mode_used,
+                    "predictive_solution_valid": bridge.state.predictive_solution_valid,
+                    "target_reachable": bridge.state.target_reachable,
                     "command_fraction": 0.0,
                     "desired_deployment_fraction": 0.0,
                     "delayed_desired_deployment_fraction": 0.0,
@@ -531,6 +721,7 @@ def run_closed_loop(
             altitude_m=measured_altitude_m if measured_altitude_m is not None else 0.0,
             altitude_std_dev_m=config["sensor_model"]["barometer_measurement_std_dev_m"],
             use_barometer=use_barometer,
+            actuator_fraction=actual_deployment,
         )
         desired_deployment = 0.0 if bridge_state.inhibit else bridge_state.deploy_fraction
         command_history.append((time, desired_deployment))
@@ -542,7 +733,18 @@ def run_closed_loop(
             if command_history[0][0] <= delayed_command_time
             else 0.0
         )
-        maximum_change = airbrake_config["maximum_rate_fraction_per_s"] * dt_s
+        actuator_rate = (
+            airbrake_config.get(
+                "opening_rate_fraction_per_s",
+                airbrake_config["maximum_rate_fraction_per_s"],
+            )
+            if delayed_desired_deployment >= actual_deployment
+            else airbrake_config.get(
+                "closing_rate_fraction_per_s",
+                airbrake_config["maximum_rate_fraction_per_s"],
+            )
+        )
+        maximum_change = actuator_rate * dt_s
         actual_deployment += max(
             -maximum_change,
             min(maximum_change, delayed_desired_deployment - actual_deployment),
@@ -566,6 +768,11 @@ def run_closed_loop(
                 "estimated_altitude_m": bridge_state.altitude_m,
                 "estimated_velocity_mps": bridge_state.velocity_mps,
                 "predicted_apogee_m": bridge_state.predicted_apogee_m,
+                "closed_predicted_apogee_m": bridge_state.closed_predicted_apogee_m,
+                "full_predicted_apogee_m": bridge_state.full_predicted_apogee_m,
+                "controller_mode_used": bridge_state.controller_mode_used,
+                "predictive_solution_valid": bridge_state.predictive_solution_valid,
+                "target_reachable": bridge_state.target_reachable,
                 "command_fraction": bridge_state.deploy_fraction,
                 "desired_deployment_fraction": desired_deployment,
                 "delayed_desired_deployment_fraction": delayed_desired_deployment,
@@ -589,13 +796,7 @@ def run_closed_loop(
 
     rocket.add_air_brakes(
         drag_coefficient_curve=lambda deployment, mach: (
-            airbrake_config["drag_coefficient_at_full_deployment"]
-            * deployment
-            * (
-                1.0
-                + airbrake_config["mach_drag_multiplier_at_mach_1"]
-                * min(max(mach, 0.0), 1.0)
-            )
+            plant_airbrake_drag_coefficient(config, deployment, mach)
         ),
         controller_function=controller,
         sampling_rate=airbrake_config["sampling_rate_hz"],
@@ -658,6 +859,8 @@ def validate_controller_log(log: list[dict[str, Any]]) -> list[str]:
         "estimated_altitude_m",
         "estimated_velocity_mps",
         "predicted_apogee_m",
+        "closed_predicted_apogee_m",
+        "full_predicted_apogee_m",
         "command_fraction",
         "desired_deployment_fraction",
         "delayed_desired_deployment_fraction",
@@ -738,11 +941,121 @@ def main() -> int:
         "  airbrake Mach-1 drag multiplier: "
         f"{100.0 * config['airbrakes']['mach_drag_multiplier_at_mach_1']:.1f}%"
     )
+
+
+def run_fixed_deployment(
+    config: dict[str, Any], deployment_fraction: float
+) -> tuple[Flight, list[dict[str, float]]]:
+    """Run a RocketPy coast with one fixed airbrake station after the safe gate.
+
+    This is predictor-calibration truth, not controller acceptance.  The plant
+    retains configured command delay and directional stroke rates, and samples
+    are useful as fixed-deployment references only after the requested station
+    has physically settled.
+    """
+    environment = build_environment(config)
+    rocket = build_rocket(config, build_motor(config))
+    airbrake_config = config["airbrakes"]
+    minimum_command_time_s = float(config["controller"]["minimum_boost_time_s"])
+    requested_fraction = min(max(float(deployment_fraction), 0.0), 1.0)
+    actual_deployment = 0.0
+    previous_time: float | None = None
+    command_history: deque[tuple[float, float]] = deque([(0.0, 0.0)])
+    log: list[dict[str, float]] = []
+
+    def fixed_controller(
+        time: float,
+        sampling_rate: float,
+        state: list[float],
+        state_history: list[list[float]],
+        observed_variables: list[Any],
+        air_brakes: Any,
+        sensors: list[Any],
+        controller_environment: Environment,
+    ) -> None:
+        del sampling_rate, state_history, observed_variables, sensors
+        nonlocal actual_deployment, previous_time
+        if previous_time is not None and time <= previous_time + 1.0e-9:
+            air_brakes.deployment_level = actual_deployment
+            return
+
+        dt_s = 0.0 if previous_time is None else time - previous_time
+        desired = requested_fraction if time >= minimum_command_time_s else 0.0
+        command_history.append((time, desired))
+        delayed_time = time - float(airbrake_config.get("actuator_delay_s", 0.0))
+        while len(command_history) > 1 and command_history[1][0] <= delayed_time:
+            command_history.popleft()
+        delayed_desired = (
+            command_history[0][1]
+            if command_history[0][0] <= delayed_time
+            else 0.0
+        )
+        rate = (
+            float(
+                airbrake_config.get(
+                    "opening_rate_fraction_per_s",
+                    airbrake_config["maximum_rate_fraction_per_s"],
+                )
+            )
+            if delayed_desired >= actual_deployment
+            else float(
+                airbrake_config.get(
+                    "closing_rate_fraction_per_s",
+                    airbrake_config["maximum_rate_fraction_per_s"],
+                )
+            )
+        )
+        maximum_change = rate * dt_s
+        actual_deployment += max(
+            -maximum_change,
+            min(maximum_change, delayed_desired - actual_deployment),
+        )
+        actual_deployment = min(max(actual_deployment, 0.0), 1.0)
+        air_brakes.deployment_level = actual_deployment
+        log.append(
+            {
+                "time_s": float(time),
+                "altitude_m": max(
+                    0.0, float(state[2]) - controller_environment.elevation
+                ),
+                "vertical_velocity_mps": float(state[5]),
+                "deployment_fraction": actual_deployment,
+            }
+        )
+        previous_time = time
+
+    rocket.add_air_brakes(
+        drag_coefficient_curve=lambda deployment, mach: (
+            plant_airbrake_drag_coefficient(config, deployment, mach)
+        ),
+        controller_function=fixed_controller,
+        sampling_rate=airbrake_config["sampling_rate_hz"],
+        clamp=True,
+        override_rocket_drag=False,
+        name=f"AMBAR fixed deployment {requested_fraction:.2f}",
+    )
+    values = config["environment"]
+    flight = Flight(
+        rocket=rocket,
+        environment=environment,
+        rail_length=values["rail_length_m"],
+        inclination=values["inclination_deg"],
+        heading=values["heading_deg"],
+        terminate_on_apogee=True,
+        max_time=40,
+        max_time_step=0.01,
+        verbose=False,
+    )
+    return flight, log
     print(
         "  fixed controller minimum boost time: "
         f"{config['controller']['minimum_boost_time_s']:.2f} s"
     )
-    print(f"  maximum deployment rate: {config['airbrakes']['maximum_rate_fraction_per_s'] * 100.0:.1f} percent/s")
+    print(
+        "  measured deployment rates: "
+        f"open={config['airbrakes'].get('opening_rate_fraction_per_s', config['airbrakes']['maximum_rate_fraction_per_s']) * 100.0:.1f}, "
+        f"close={config['airbrakes'].get('closing_rate_fraction_per_s', config['airbrakes']['maximum_rate_fraction_per_s']) * 100.0:.1f} percent/s"
+    )
     print(f"  actuator command delay: {config['airbrakes'].get('actuator_delay_s', 0.0) * 1000.0:.0f} ms")
     print(f"  barometer rate: {config['airbrakes']['barometer_rate_hz']:.1f} Hz")
     print(f"  accelerometer bias/noise: {config['sensor_model']['accelerometer_bias_mps2']:.2f} / {config['sensor_model']['accelerometer_noise_std_dev_mps2']:.2f} m/s^2")

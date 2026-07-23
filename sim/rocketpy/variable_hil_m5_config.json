@@ -1,0 +1,57 @@
+{
+  "model_status": "Explicit 50 Hz provisional M5 VARIABLE_HIL profile; passive drag fitted to 3379 ft with RocketPy mass and J420R motor unchanged",
+  "rocket": {
+    "power_on_drag_coefficient": 0.526464844,
+    "power_off_drag_coefficient": 0.526464844
+  },
+  "airbrakes": {
+    "sampling_rate_hz": 50.0,
+    "maximum_rate_fraction_per_s": 0.864,
+    "opening_rate_fraction_per_s": 0.864,
+    "closing_rate_fraction_per_s": 0.844,
+    "actuator_delay_s": 0.10,
+    "drag_coefficient_at_full_deployment": 1.866371360,
+    "mach_drag_multiplier_at_mach_1": 0.0
+  },
+  "controller": {
+    "minimum_boost_time_s": 1.80,
+    "target_apogee_ft": 3000.0,
+    "target_tolerance_ft": 100.0,
+    "mission_tolerance_ft": 100.0,
+    "control_deadband_ft": 10.0,
+    "deployment_hysteresis_fraction": 0.02,
+    "predictive_update_period_s": 0.05,
+    "control_mode": "predictive"
+  },
+  "predictor": {
+    "calibration_version": 20260719,
+    "calibration_status": "PROVISIONAL_M5_VARIABLE_HIL_ONLY",
+    "passive_reference_apogee_ft": 3379.0,
+    "fitted_rocket_drag_coefficient": 0.526464844,
+    "frontal_area_m2": 0.004932493,
+    "passive_fit_apogee_ft": 3378.9983,
+    "passive_fit_residual_ft": -0.0017,
+    "passive_fit_method": "12-step deterministic bisection of equal RocketPy power-on/off Cd; target 3379 ft AGL; rocket dry mass, motor mass, thrust curve, environment, and geometry held fixed",
+    "coast_mass_kg": 3.27328,
+    "baseline_drag_area_m2": 0.002596784,
+    "deployment_drag_area_m2": [
+      0.002596784,
+      0.004898250,
+      0.007199716,
+      0.009501182,
+      0.011802649
+    ],
+    "actuator_delay_s": 0.10,
+    "actuator_open_rate_fraction_per_s": 0.864,
+    "actuator_close_rate_fraction_per_s": 0.844
+  },
+  "provenance": {
+    "controller_configuration": "Explicit M5 VARIABLE_HIL profile at 50 Hz; Normal firmware and the general reference config retain their legacy proportional defaults",
+    "motor_burn_time": "VARIABLE_HIL coast/deployment gate is fixed at 1.80 s after liftoff: 1.69 s screening maximum J420R burn plus 0.10 s margin; sampled truth is never sent to the controller",
+    "rocket_drag": "PROVISIONAL FIT - Cd 0.526464844 produces 3378.9983 ft AGL against the documented 3379 ft passive reference; residual -0.0017 ft; mass and motor inputs unchanged",
+    "airbrake_drag": "PROVISIONAL - baseline CdA 0.002596784 m^2 uses the passive fit; incremental full-deployment CdA 0.009205864 m^2 is derived from 219.286 N at 197.206 m/s assuming rho=1.225 kg/m^3; divided by 0.004932493 m^2 reference area this is RocketPy incremental Cd 1.866371360; 25/50/75 percent points are linear",
+    "airbrake_load": "M5 load point: 54.8215 N per fin, 219.286 N total for four fins, 197.206 m/s, assumed rho=1.225 kg/m^3",
+    "actuator_delay": "PROVISIONAL 0.10 s command-to-motion delay; replace with loaded bench measurement",
+    "airbrake_mach_scaling": "Disabled for VARIABLE_HIL because the only M5 load point is already at 197.206 m/s; a placeholder Mach multiplier would double-count unsupported dependence"
+  }
+}

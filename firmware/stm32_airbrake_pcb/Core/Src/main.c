@@ -132,9 +132,11 @@ static void MX_I2C2_Init(void);
  */
 static HAL_StatusTypeDef BMP388_ReadChipId(uint8_t *chip_id);
 static HAL_StatusTypeDef Flash_ReadJedecId(uint8_t jedec_id[3]);
+#if AMBAR_FEATURE_RADIO
 static HAL_StatusTypeDef SX1280_WaitWhileBusy(uint32_t timeout_ms);
 static HAL_StatusTypeDef SX1280_ReadStatus(uint8_t *status_byte);
 static HAL_StatusTypeDef SX1280_BringupTest(uint8_t *status_byte);
+#endif
 #if AMBAR_FEATURE_WATCHDOG
 static HAL_StatusTypeDef AmbarWatchdog_Init(void);
 static void AmbarWatchdog_Refresh(void);
@@ -221,6 +223,7 @@ static HAL_StatusTypeDef Flash_ReadJedecId(uint8_t jedec_id[3])
   return status;
 }
 
+#if AMBAR_FEATURE_RADIO
 static HAL_StatusTypeDef SX1280_WaitWhileBusy(uint32_t timeout_ms)
 {
   /*
@@ -290,6 +293,7 @@ static HAL_StatusTypeDef SX1280_BringupTest(uint8_t *status_byte)
 
   return SX1280_ReadStatus(status_byte);
 }
+#endif
 /* USER CODE END 0 */
 
 /**
@@ -476,6 +480,15 @@ void SystemClock_Config(void)
   * in the RCC_OscInitTypeDef structure.
   */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+#if AMBAR_BUILD_IS_CONTINUOUS_HIL
+  /*
+   * Keep the HIL USB clock on the CubeMX-generated, hardware-proven startup
+   * path.  The host link is mandatory in this profile and must enumerate
+   * reliably before any motion authority can exist.
+   */
+  RCC_OscInitStruct.OscillatorType |= RCC_OSCILLATORTYPE_HSI48;
+  RCC_OscInitStruct.HSI48State = RCC_HSI48_ON;
+#endif
   RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS_DIGITAL;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLL1_SOURCE_HSE;
@@ -841,8 +854,10 @@ static void MX_SPI3_Init(void)
 #if AMBAR_FEATURE_USB_PROTOCOL
 static HAL_StatusTypeDef MX_USB_PCD_Init(void)
 {
+#if !AMBAR_BUILD_IS_CONTINUOUS_HIL
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
+#endif
 
   /* USER CODE BEGIN USB_Init 0 */
 
@@ -851,9 +866,10 @@ static HAL_StatusTypeDef MX_USB_PCD_Init(void)
   /* USER CODE BEGIN USB_Init 1 */
 
   /*
-   * USB is optional. Keep HSI48 out of SystemClock_Config() so a USB-clock
-   * failure cannot stop the HSE/PLL flight clock or the rest of the firmware.
+   * NORMAL keeps USB fail-soft. CONTINUOUS_HIL uses the hardware-proven
+   * SystemClock_Config()/HAL_PCD_MspInit path because USB is mandatory there.
    */
+#if !AMBAR_BUILD_IS_CONTINUOUS_HIL
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48;
   RCC_OscInitStruct.HSI48State = RCC_HSI48_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
@@ -868,6 +884,7 @@ static HAL_StatusTypeDef MX_USB_PCD_Init(void)
   {
     return HAL_ERROR;
   }
+#endif
 
   /* USER CODE END USB_Init 1 */
   hpcd_USB_DRD_FS.Instance = USB_DRD_FS;

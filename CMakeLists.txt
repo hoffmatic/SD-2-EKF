@@ -91,17 +91,93 @@ target_include_directories(ambar_rocket_protocol_tests PRIVATE
     firmware/stm32_airbrake_pcb/Core/Inc
 )
 
+# The VARIABLE_HIL application consumes these pure decisions for arming and
+# session teardown.  Keeping the policy HAL-free lets the host suite exercise
+# stale-input and USB-loss behavior directly rather than relying on source-text
+# checks around the embedded application loop.
+add_executable(ambar_variable_hil_policy_tests
+    firmware/stm32_airbrake_pcb/Core/Src/ambar_variable_hil_policy.c
+    firmware/stm32_airbrake_pcb/HostTests/variable_hil_policy_tests.c
+)
+target_compile_features(ambar_variable_hil_policy_tests PRIVATE c_std_11)
+target_include_directories(ambar_variable_hil_policy_tests PRIVATE
+    firmware/stm32_airbrake_pcb/Core/Inc
+)
+
+# A V2 flash record must migrate into the expanded V3 control structure in RAM
+# without an automatic write.  This target compiles the production config
+# implementation and supplies only flash/flight/actuator fakes at its boundary.
+# ST's CMSIS device header explicitly rejects MSVC's preprocessor, so this one
+# target is built by GCC/Clang hosts (including CI and the local MinGW run).
+if(NOT MSVC)
+    add_executable(ambar_config_migration_tests
+        firmware/stm32_airbrake_pcb/Core/Src/ambar_config.c
+        firmware/stm32_airbrake_pcb/HostTests/ambar_config_migration_tests.c
+    )
+    target_compile_features(ambar_config_migration_tests PRIVATE c_std_11)
+    target_compile_definitions(ambar_config_migration_tests PRIVATE
+        STM32H562xx
+        USE_HAL_DRIVER
+    )
+    target_include_directories(ambar_config_migration_tests PRIVATE
+        firmware/stm32_airbrake_pcb/Core/Inc
+        firmware/stm32_airbrake_pcb/Drivers/STM32H5xx_HAL_Driver/Inc
+        firmware/stm32_airbrake_pcb/Drivers/STM32H5xx_HAL_Driver/Inc/Legacy
+        firmware/stm32_airbrake_pcb/Drivers/CMSIS/Device/ST/STM32H5xx/Include
+        firmware/stm32_airbrake_pcb/Drivers/CMSIS/Include
+    )
+    target_link_libraries(ambar_config_migration_tests PRIVATE m)
+endif()
+
 add_executable(ambar_actuator_autoretract_tests
     firmware/stm32_airbrake_pcb/Core/Src/ambar_actuator.c
     firmware/stm32_airbrake_pcb/HostTests/actuator_autoretract_tests.c
 )
 target_compile_features(ambar_actuator_autoretract_tests PRIVATE c_std_11)
+target_compile_definitions(ambar_actuator_autoretract_tests PRIVATE
+    AMBAR_BUILD_PROFILE=AMBAR_BUILD_PROFILE_NORMAL
+)
 target_include_directories(ambar_actuator_autoretract_tests PRIVATE
     firmware/stm32_airbrake_pcb/HostTests/actuator_fakes
     firmware/stm32_airbrake_pcb/Core/Inc
 )
 if(NOT MSVC)
     target_link_libraries(ambar_actuator_autoretract_tests PRIVATE m)
+endif()
+
+add_executable(ambar_actuator_hil_limit_tests
+    firmware/stm32_airbrake_pcb/Core/Src/ambar_actuator.c
+    firmware/stm32_airbrake_pcb/HostTests/actuator_hil_limit_tests.c
+)
+target_compile_features(ambar_actuator_hil_limit_tests PRIVATE c_std_11)
+target_compile_definitions(ambar_actuator_hil_limit_tests PRIVATE
+    AMBAR_BUILD_PROFILE=AMBAR_BUILD_PROFILE_CONTINUOUS_HIL
+)
+target_include_directories(ambar_actuator_hil_limit_tests PRIVATE
+    firmware/stm32_airbrake_pcb/HostTests/actuator_fakes
+    firmware/stm32_airbrake_pcb/Core/Inc
+)
+if(NOT MSVC)
+    target_link_libraries(ambar_actuator_hil_limit_tests PRIVATE m)
+endif()
+
+# VARIABLE_HIL uses the production fractional controller-to-actuator path while
+# retaining HIL-only simulation/freshness gates.  Compiling the same actuator
+# source under the third profile is an explicit isolation regression check.
+add_executable(ambar_actuator_variable_hil_tests
+    firmware/stm32_airbrake_pcb/Core/Src/ambar_actuator.c
+    firmware/stm32_airbrake_pcb/HostTests/actuator_autoretract_tests.c
+)
+target_compile_features(ambar_actuator_variable_hil_tests PRIVATE c_std_11)
+target_compile_definitions(ambar_actuator_variable_hil_tests PRIVATE
+    AMBAR_BUILD_PROFILE=AMBAR_BUILD_PROFILE_VARIABLE_HIL
+)
+target_include_directories(ambar_actuator_variable_hil_tests PRIVATE
+    firmware/stm32_airbrake_pcb/HostTests/actuator_fakes
+    firmware/stm32_airbrake_pcb/Core/Inc
+)
+if(NOT MSVC)
+    target_link_libraries(ambar_actuator_variable_hil_tests PRIVATE m)
 endif()
 
 add_executable(ambar_flight_profile_replay
@@ -115,6 +191,19 @@ target_include_directories(ambar_flight_profile_replay PRIVATE
 )
 if(NOT MSVC)
     target_link_libraries(ambar_flight_profile_replay PRIVATE m)
+endif()
+
+add_executable(ambar_flight_predictive_solver_tests
+    firmware/stm32_airbrake_pcb/Core/Src/ambar_ekf.c
+    firmware/stm32_airbrake_pcb/Core/Src/ambar_flight.c
+    firmware/stm32_airbrake_pcb/HostTests/flight_predictive_solver_tests.c
+)
+target_compile_features(ambar_flight_predictive_solver_tests PRIVATE c_std_11)
+target_include_directories(ambar_flight_predictive_solver_tests PRIVATE
+    firmware/stm32_airbrake_pcb/Core/Inc
+)
+if(NOT MSVC)
+    target_link_libraries(ambar_flight_predictive_solver_tests PRIVATE m)
 endif()
 
 add_executable(sim_fault_replay_sandbox
@@ -147,8 +236,12 @@ if(MSVC)
     # rocket_protocol_tests.c uses the standard assert() macro; keep those
     # checks active even when CI builds the Release configuration.
     target_compile_options(ambar_rocket_protocol_tests PRIVATE /W4 /UNDEBUG)
+    target_compile_options(ambar_variable_hil_policy_tests PRIVATE /W4)
     target_compile_options(ambar_actuator_autoretract_tests PRIVATE /W4)
+    target_compile_options(ambar_actuator_hil_limit_tests PRIVATE /W4)
+    target_compile_options(ambar_actuator_variable_hil_tests PRIVATE /W4)
     target_compile_options(ambar_flight_profile_replay PRIVATE /W4)
+    target_compile_options(ambar_flight_predictive_solver_tests PRIVATE /W4)
     target_compile_options(sim_fault_replay_sandbox PRIVATE /W4)
     target_compile_options(sim_monte_carlo_sandbox PRIVATE /W4)
     target_compile_options(ambar_core_tests PRIVATE /W4)
@@ -160,8 +253,13 @@ else()
     target_compile_options(ambar_controller_bridge PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(ambar_stm32_controller_bridge PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(ambar_rocket_protocol_tests PRIVATE -Wall -Wextra -Wpedantic -UNDEBUG)
+    target_compile_options(ambar_variable_hil_policy_tests PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(ambar_config_migration_tests PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(ambar_actuator_autoretract_tests PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(ambar_actuator_hil_limit_tests PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(ambar_actuator_variable_hil_tests PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(ambar_flight_profile_replay PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(ambar_flight_predictive_solver_tests PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(sim_fault_replay_sandbox PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(sim_monte_carlo_sandbox PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(ambar_core_tests PRIVATE -Wall -Wextra -Wpedantic)
@@ -175,7 +273,14 @@ if(BUILD_TESTING)
     add_test(NAME fault_replay_sandbox COMMAND sim_fault_replay_sandbox)
     add_test(NAME monte_carlo_sandbox COMMAND sim_monte_carlo_sandbox)
     add_test(NAME stm32_rocket_protocol COMMAND ambar_rocket_protocol_tests)
+    add_test(NAME stm32_variable_hil_policy COMMAND ambar_variable_hil_policy_tests)
+    if(NOT MSVC)
+        add_test(NAME stm32_config_migration COMMAND ambar_config_migration_tests)
+    endif()
     add_test(NAME stm32_actuator_autoretract COMMAND ambar_actuator_autoretract_tests)
+    add_test(NAME stm32_actuator_hil_limits COMMAND ambar_actuator_hil_limit_tests)
+    add_test(NAME stm32_actuator_variable_hil COMMAND ambar_actuator_variable_hil_tests)
+    add_test(NAME stm32_flight_predictive_solver COMMAND ambar_flight_predictive_solver_tests)
     add_test(
         NAME stm32_flight_profile_replay
         COMMAND ambar_flight_profile_replay

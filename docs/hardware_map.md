@@ -157,13 +157,18 @@ Relevant TMC5240 nets:
 
 | STM32 Pin | Net |
 | --- | --- |
-| `PA1` | `/LED_1` |
-| `PA0` | `/LED_2` |
+| `PA1` | `/LED_1` through R23 |
+| `PA0` | `/LED_2` through R24 |
 | `PC3` | `/LED_3` |
 | `PC0` | `/LED_4` |
 | `PB5` | `/LED_5` |
 | `PB4` | `/LED_6` |
 | `PH0` | `/MCU_TCXO` |
+
+Continuous HIL does not modify these LED circuits and does not add HOME/FULL
+switches. Its HOME reference is an explicitly operator-confirmed software zero
+using TMC5240 ramp state. See `docs/continuous_hil_commissioning.md` for the
+measurement and safety boundary before applying motor power.
 
 ## Changes From Earlier Assumptions
 

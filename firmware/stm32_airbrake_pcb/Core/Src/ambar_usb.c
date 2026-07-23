@@ -444,19 +444,13 @@ bool AmbarUsb_TakePacket(RocketDecodedPacket *packet)
     return true;
 }
 
-bool AmbarUsb_QueuePacket(uint8_t type,
-                          const uint8_t *payload,
-                          size_t payload_length,
-                          uint32_t time_ms)
+static bool ambar_usb_queue_packet_with_sequence(uint8_t type,
+                                                  uint16_t sequence,
+                                                  const uint8_t *payload,
+                                                  size_t payload_length,
+                                                  uint32_t time_ms)
 {
-    /* Frame immediately into owned storage; USB transmission happens in Task(). */
-#if !AMBAR_FEATURE_USB_PROTOCOL
-    (void)type;
-    (void)payload;
-    (void)payload_length;
-    (void)time_ms;
-    return false;
-#else
+#if AMBAR_FEATURE_USB_PROTOCOL
     if (!AmbarUsb_IsConfigured())
     {
         return false;
@@ -471,7 +465,7 @@ bool AmbarUsb_QueuePacket(uint8_t type,
     const size_t length = RocketProtocol_EncodeFrame(frame->bytes,
                                                      sizeof(frame->bytes),
                                                      type,
-                                                     s_tx_sequence,
+                                                     sequence,
                                                      time_ms,
                                                      payload,
                                                      payload_length);
@@ -484,9 +478,46 @@ bool AmbarUsb_QueuePacket(uint8_t type,
     frame->length = (uint8_t)length;
     s_tx_tail = (uint8_t)((s_tx_tail + 1u) % AMBAR_USB_TX_QUEUE_DEPTH);
     ++s_tx_count;
+    return true;
+#else
+    (void)type;
+    (void)sequence;
+    (void)payload;
+    (void)payload_length;
+    (void)time_ms;
+    return false;
+#endif
+}
+
+bool AmbarUsb_QueuePacket(uint8_t type,
+                          const uint8_t *payload,
+                          size_t payload_length,
+                          uint32_t time_ms)
+{
+    /* Frame immediately into owned storage; USB transmission happens in Task(). */
+    if (!ambar_usb_queue_packet_with_sequence(type,
+                                               s_tx_sequence,
+                                               payload,
+                                               payload_length,
+                                               time_ms))
+    {
+        return false;
+    }
     ++s_tx_sequence;
     return true;
-#endif
+}
+
+bool AmbarUsb_QueueCorrelatedPacket(uint8_t type,
+                                    uint16_t sequence,
+                                    const uint8_t *payload,
+                                    size_t payload_length,
+                                    uint32_t time_ms)
+{
+    return ambar_usb_queue_packet_with_sequence(type,
+                                                 sequence,
+                                                 payload,
+                                                 payload_length,
+                                                 time_ms);
 }
 
 bool AmbarUsb_IsConfigured(void)

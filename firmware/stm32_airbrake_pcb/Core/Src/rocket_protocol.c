@@ -438,6 +438,138 @@ size_t RocketProtocol_EncodeActuatorStatusPayload(
     return ROCKET_ACTUATOR_STATUS_PAYLOAD_SIZE;
 }
 
+size_t RocketProtocol_EncodeVariableHilStatePayload(
+    uint8_t *out,
+    size_t capacity,
+    const RocketVariableHilStatePayload *p)
+{
+    if (out == NULL || p == NULL || capacity < ROCKET_VARIABLE_HIL_STATE_PAYLOAD_SIZE)
+    {
+        return 0u;
+    }
+    RocketProtocol_WriteU16(out + 0, p->simulation_sequence);
+    RocketProtocol_WriteU16(out + 2, p->controller_fraction_u16);
+    RocketProtocol_WriteU16(out + 4, p->actuator_target_fraction_u16);
+    RocketProtocol_WriteU16(out + 6, p->xactual_fraction_u16);
+    RocketProtocol_WriteI32(out + 8, p->target_steps);
+    RocketProtocol_WriteI32(out + 12, p->actual_steps);
+    RocketProtocol_WriteU32(out + 16, p->flight_inhibit_flags);
+    RocketProtocol_WriteU32(out + 20, p->actuator_inhibit_flags);
+    RocketProtocol_WriteU32(out + 24, p->driver_status);
+    RocketProtocol_WriteU32(out + 28, p->config_crc32);
+    RocketProtocol_WriteI32(out + 32, p->closed_predicted_apogee_dm);
+    RocketProtocol_WriteI32(out + 36, p->full_predicted_apogee_dm);
+    out[40] = p->phase;
+    out[41] = p->machine_state;
+    out[42] = p->state_flags;
+    out[43] = p->feedback_source;
+    return ROCKET_VARIABLE_HIL_STATE_PAYLOAD_SIZE;
+}
+
+int RocketProtocol_DecodeVariableHilStatePayload(
+    const uint8_t *data,
+    size_t length,
+    RocketVariableHilStatePayload *p)
+{
+    if (data == NULL || p == NULL || length != ROCKET_VARIABLE_HIL_STATE_PAYLOAD_SIZE)
+    {
+        return 0;
+    }
+    p->simulation_sequence = RocketProtocol_ReadU16(data + 0);
+    p->controller_fraction_u16 = RocketProtocol_ReadU16(data + 2);
+    p->actuator_target_fraction_u16 = RocketProtocol_ReadU16(data + 4);
+    p->xactual_fraction_u16 = RocketProtocol_ReadU16(data + 6);
+    p->target_steps = RocketProtocol_ReadI32(data + 8);
+    p->actual_steps = RocketProtocol_ReadI32(data + 12);
+    p->flight_inhibit_flags = RocketProtocol_ReadU32(data + 16);
+    p->actuator_inhibit_flags = RocketProtocol_ReadU32(data + 20);
+    p->driver_status = RocketProtocol_ReadU32(data + 24);
+    p->config_crc32 = RocketProtocol_ReadU32(data + 28);
+    p->closed_predicted_apogee_dm = RocketProtocol_ReadI32(data + 32);
+    p->full_predicted_apogee_dm = RocketProtocol_ReadI32(data + 36);
+    p->phase = data[40];
+    p->machine_state = data[41];
+    p->state_flags = data[42];
+    p->feedback_source = data[43];
+    return 1;
+}
+
+size_t RocketProtocol_EncodeVariableHilConfigPayload(
+    uint8_t *out,
+    size_t capacity,
+    const RocketVariableHilConfigPayload *p)
+{
+    if (out == NULL || p == NULL || capacity < ROCKET_VARIABLE_HIL_CONFIG_PAYLOAD_SIZE)
+    {
+        return 0u;
+    }
+    out[0] = p->schema_version;
+    out[1] = p->control_mode;
+    out[2] = p->predictor_mode;
+    out[3] = p->cda_point_count;
+    RocketProtocol_WriteU32(out + 4, p->calibration_version);
+    RocketProtocol_WriteU16(out + 8, p->target_apogee_dm);
+    RocketProtocol_WriteU16(out + 10, p->mission_tolerance_dm);
+    RocketProtocol_WriteU16(out + 12, p->control_deadband_cm);
+    RocketProtocol_WriteU16(out + 14, p->full_deployment_error_dm);
+    RocketProtocol_WriteU16(out + 16, p->minimum_deploy_altitude_dm);
+    RocketProtocol_WriteU16(out + 18, p->minimum_flight_time_cs);
+    RocketProtocol_WriteU16(out + 20, p->predictive_update_period_ms);
+    RocketProtocol_WriteU16(out + 22, p->coast_mass_g);
+    out[24] = p->maximum_deploy_u8;
+    out[25] = p->hysteresis_permille;
+    for (size_t i = 0u; i < ROCKET_VARIABLE_HIL_CDA_POINT_COUNT; ++i)
+    {
+        RocketProtocol_WriteU16(out + 26u + 2u * i, p->deployment_cda_um2[i]);
+    }
+    RocketProtocol_WriteU16(out + 36, p->air_density_1e4_kgpm3);
+    RocketProtocol_WriteU16(out + 38, p->density_scale_height_m);
+    RocketProtocol_WriteI16(out + 40, p->launch_site_elevation_dm);
+    RocketProtocol_WriteU16(out + 42, p->actuator_delay_ms);
+    RocketProtocol_WriteU16(out + 44, p->actuator_open_rate_milli_per_s);
+    RocketProtocol_WriteU16(out + 46, p->actuator_close_rate_milli_per_s);
+    RocketProtocol_WriteU32(out + 48, p->config_crc32);
+    return ROCKET_VARIABLE_HIL_CONFIG_PAYLOAD_SIZE;
+}
+
+int RocketProtocol_DecodeVariableHilConfigPayload(
+    const uint8_t *data,
+    size_t length,
+    RocketVariableHilConfigPayload *p)
+{
+    if (data == NULL || p == NULL || length != ROCKET_VARIABLE_HIL_CONFIG_PAYLOAD_SIZE)
+    {
+        return 0;
+    }
+    p->schema_version = data[0];
+    p->control_mode = data[1];
+    p->predictor_mode = data[2];
+    p->cda_point_count = data[3];
+    p->calibration_version = RocketProtocol_ReadU32(data + 4);
+    p->target_apogee_dm = RocketProtocol_ReadU16(data + 8);
+    p->mission_tolerance_dm = RocketProtocol_ReadU16(data + 10);
+    p->control_deadband_cm = RocketProtocol_ReadU16(data + 12);
+    p->full_deployment_error_dm = RocketProtocol_ReadU16(data + 14);
+    p->minimum_deploy_altitude_dm = RocketProtocol_ReadU16(data + 16);
+    p->minimum_flight_time_cs = RocketProtocol_ReadU16(data + 18);
+    p->predictive_update_period_ms = RocketProtocol_ReadU16(data + 20);
+    p->coast_mass_g = RocketProtocol_ReadU16(data + 22);
+    p->maximum_deploy_u8 = data[24];
+    p->hysteresis_permille = data[25];
+    for (size_t i = 0u; i < ROCKET_VARIABLE_HIL_CDA_POINT_COUNT; ++i)
+    {
+        p->deployment_cda_um2[i] = RocketProtocol_ReadU16(data + 26u + 2u * i);
+    }
+    p->air_density_1e4_kgpm3 = RocketProtocol_ReadU16(data + 36);
+    p->density_scale_height_m = RocketProtocol_ReadU16(data + 38);
+    p->launch_site_elevation_dm = RocketProtocol_ReadI16(data + 40);
+    p->actuator_delay_ms = RocketProtocol_ReadU16(data + 42);
+    p->actuator_open_rate_milli_per_s = RocketProtocol_ReadU16(data + 44);
+    p->actuator_close_rate_milli_per_s = RocketProtocol_ReadU16(data + 46);
+    p->config_crc32 = RocketProtocol_ReadU32(data + 48);
+    return 1;
+}
+
 size_t RocketProtocol_EncodeHeartbeatPayload(uint8_t *out,
                                              size_t capacity,
                                              const RocketHeartbeatPayload *p)
@@ -521,6 +653,11 @@ const char *RocketProtocol_CommandText(uint8_t code)
     case ROCKET_CMD_BENCH_MOVE_STEPS: return "BENCH_MOVE_STEPS";
     case ROCKET_CMD_SIM_START: return "SIM_START";
     case ROCKET_CMD_SIM_STOP: return "SIM_STOP";
+    case ROCKET_CMD_HIL_SET_OVERRIDE: return "HIL_SET_OVERRIDE";
+    case ROCKET_CMD_VARIABLE_HIL_GET_CONFIG: return "VARIABLE_HIL_GET_CONFIG";
+    case ROCKET_CMD_VARIABLE_HIL_CONFIG_UPLOAD: return "VARIABLE_HIL_CONFIG_UPLOAD";
+    case ROCKET_CMD_RECOVER_KNOWN_FULL_RETRACT:
+        return "RECOVER_KNOWN_FULL_RETRACT";
     case ROCKET_CMD_START_LOG: return "START_LOG";
     case ROCKET_CMD_STOP_LOG: return "STOP_LOG";
     case ROCKET_CMD_ERASE_LOG: return "ERASE_LOG";
