@@ -24,9 +24,11 @@
  *
  * STATE fields
  *   deploy_fraction, inhibit, inhibit_flags, estimated altitude, estimated
- *   vertical velocity, predicted apogee, health, and phase name.  The format is
- *   intentionally identical to the older C++ bridge so the physics adapter can
- *   switch to production firmware logic without a second parser.
+ *   vertical velocity, selected/retracted/full predicted apogee, health,
+ *   controller mode, predictive-valid flag, and phase name.
+ *
+ *   PREDICT <altitude_m> <velocity_mps> <current_fraction> <target_fraction>
+ *     Evaluate the pure production coast predictor for calibration tooling.
  *
  * Validation boundary
  *   This proves production estimator/controller behavior in a closed software
@@ -47,14 +49,19 @@ static void write_output(void)
 {
     const AmbarFlightOutput_t output = AmbarFlight_GetOutput();
 
-    printf("STATE %.6f %u %lu %.6f %.6f %.6f %u %s\n",
+    printf("STATE %.6f %u %lu %.6f %.6f %.6f %.6f %.6f %u %u %u %u %s\n",
            (double)output.airbrake_command.deploy_fraction,
            output.airbrake_command.inhibit ? 1U : 0U,
            (unsigned long)output.airbrake_command.inhibit_flags,
            (double)output.estimate.altitude_agl_m,
            (double)output.estimate.vertical_velocity_mps,
            (double)output.estimate.predicted_apogee_m,
+           (double)output.closed_predicted_apogee_m,
+           (double)output.full_predicted_apogee_m,
            output.health.healthy ? 1U : 0U,
+           (unsigned)output.controller_mode_used,
+           output.predictive_solution_valid ? 1U : 0U,
+           output.target_reachable ? 1U : 0U,
            AmbarFlight_PhaseName(output.phase));
     fflush(stdout);
 }
@@ -73,6 +80,19 @@ static int parse_finite_float(const char *text, float *value)
     return 1;
 }
 
+static int parse_u32(const char *text, uint32_t *value)
+{
+    char *end = NULL;
+    const unsigned long parsed = strtoul(text, &end, 10);
+
+    if (end == text || *end != '\0' || parsed > 0xFFFFFFFFUL)
+    {
+        return 0;
+    }
+    *value = (uint32_t)parsed;
+    return 1;
+}
+
 /** Apply the fixed runtime configuration selected before a study begins. */
 static int apply_arguments(int argc, char **argv, AmbarFlightConfig_t *config)
 {
@@ -83,7 +103,25 @@ static int apply_arguments(int argc, char **argv, AmbarFlightConfig_t *config)
         float value;
         const char *option = argv[index];
 
-        if (index + 1 >= argc || !parse_finite_float(argv[index + 1], &value))
+        if (index + 1 >= argc)
+        {
+            fprintf(stderr, "Missing or invalid value for %s.\n", option);
+            return 0;
+        }
+
+        if (strcmp(option, "--calibration-version") == 0)
+        {
+            uint32_t version;
+            if (!parse_u32(argv[index + 1], &version))
+            {
+                fprintf(stderr, "Missing or invalid value for %s.\n", option);
+                return 0;
+            }
+            config->apogee.calibration_version = version;
+            continue;
+        }
+
+        if (!parse_finite_float(argv[index + 1], &value))
         {
             fprintf(stderr, "Missing or invalid value for %s.\n", option);
             return 0;
@@ -100,6 +138,92 @@ static int apply_arguments(int argc, char **argv, AmbarFlightConfig_t *config)
         else if (strcmp(option, "--target-tolerance-m") == 0 && value >= 0.0f)
         {
             config->controller.apogee_tolerance_m = value;
+            config->controller.mission_tolerance_m = value;
+        }
+        else if (strcmp(option, "--mission-tolerance-m") == 0 && value > 0.0f)
+        {
+            config->controller.apogee_tolerance_m = value;
+            config->controller.mission_tolerance_m = value;
+        }
+        else if (strcmp(option, "--control-deadband-m") == 0 && value >= 0.0f)
+        {
+            config->controller.control_deadband_m = value;
+        }
+        else if (strcmp(option, "--deployment-hysteresis") == 0 && value >= 0.0f)
+        {
+            config->controller.deployment_hysteresis_fraction = value;
+        }
+        else if (strcmp(option, "--predictive-period-s") == 0 && value > 0.0f)
+        {
+            config->controller.predictive_update_period_s = value;
+        }
+        else if (strcmp(option, "--control-mode") == 0
+                 && (value == 0.0f || value == 1.0f))
+        {
+            config->controller.control_mode = (AmbarAirbrakeControlMode_t)((int)value);
+        }
+        else if (strcmp(option, "--coast-mass-kg") == 0 && value > 0.0f)
+        {
+            config->apogee.coast_mass_kg = value;
+            config->apogee.vehicle_mass_kg = value;
+        }
+        else if (strcmp(option, "--baseline-cda-m2") == 0 && value > 0.0f)
+        {
+            config->apogee.baseline_drag_area_m2 = value;
+            config->apogee.drag_area_m2 = value;
+        }
+        else if (strcmp(option, "--cda-0-m2") == 0 && value > 0.0f)
+        {
+            config->apogee.deployment_drag_area_m2[0] = value;
+        }
+        else if (strcmp(option, "--cda-25-m2") == 0 && value > 0.0f)
+        {
+            config->apogee.deployment_drag_area_m2[1] = value;
+        }
+        else if (strcmp(option, "--cda-50-m2") == 0 && value > 0.0f)
+        {
+            config->apogee.deployment_drag_area_m2[2] = value;
+        }
+        else if (strcmp(option, "--cda-75-m2") == 0 && value > 0.0f)
+        {
+            config->apogee.deployment_drag_area_m2[3] = value;
+        }
+        else if (strcmp(option, "--cda-100-m2") == 0 && value > 0.0f)
+        {
+            config->apogee.deployment_drag_area_m2[4] = value;
+        }
+        else if (strcmp(option, "--sea-level-density-kgpm3") == 0 && value > 0.0f)
+        {
+            config->apogee.sea_level_air_density_kgpm3 = value;
+            config->apogee.air_density_kgpm3 = value;
+        }
+        else if (strcmp(option, "--density-scale-height-m") == 0 && value > 0.0f)
+        {
+            config->apogee.density_scale_height_m = value;
+        }
+        else if (strcmp(option, "--launch-site-elevation-m") == 0)
+        {
+            config->apogee.launch_site_elevation_m = value;
+        }
+        else if (strcmp(option, "--predictor-time-step-s") == 0 && value > 0.0f)
+        {
+            config->apogee.time_step_s = value;
+        }
+        else if (strcmp(option, "--predictor-max-time-s") == 0 && value > 0.0f)
+        {
+            config->apogee.max_predict_time_s = value;
+        }
+        else if (strcmp(option, "--actuator-delay-s") == 0 && value >= 0.0f)
+        {
+            config->apogee.actuator_delay_s = value;
+        }
+        else if (strcmp(option, "--actuator-open-rate") == 0 && value > 0.0f)
+        {
+            config->apogee.actuator_open_rate_fraction_per_s = value;
+        }
+        else if (strcmp(option, "--actuator-close-rate") == 0 && value > 0.0f)
+        {
+            config->apogee.actuator_close_rate_fraction_per_s = value;
         }
         else
         {
@@ -115,12 +239,22 @@ int main(int argc, char **argv)
     char line[512];
     AmbarFlightConfig_t config = AmbarFlight_DefaultConfig();
 
-    if (!apply_arguments(argc, argv, &config))
+    if (!apply_arguments(argc, argv, &config)
+        || !AmbarFlight_ValidateControlConfig(&config.controller,
+                                              &config.apogee,
+                                              NULL))
     {
         fputs("Usage: ambar_stm32_controller_bridge"
               " [--minimum-boost-time seconds]"
               " [--target-apogee-m meters]"
-              " [--target-tolerance-m meters]\n",
+              " [--target-tolerance-m meters]"
+              " [--control-deadband-m meters]"
+              " [--control-mode 0_or_1]"
+              " [--coast-mass-kg kilograms]"
+              " [--cda-0-m2 value] ... [--cda-100-m2 value]"
+              " [--actuator-delay-s seconds]"
+              " [--actuator-open-rate fraction_per_s]"
+              " [--actuator-close-rate fraction_per_s]\n",
               stderr);
         return 2;
     }
@@ -160,21 +294,27 @@ int main(int argc, char **argv)
             float acceleration_mps2;
             float altitude_m;
             float barometer_stddev_m;
+            float actuator_fraction = 0.0f;
             int use_barometer;
+            int parsed_fields;
 
-            if (sscanf(line,
-                       "%*s %f %f %f %f %d",
-                       &timestamp_s,
-                       &acceleration_mps2,
-                       &altitude_m,
-                       &barometer_stddev_m,
-                       &use_barometer) != 5)
+            parsed_fields = sscanf(line,
+                                   "%*s %f %f %f %f %d %f",
+                                   &timestamp_s,
+                                   &acceleration_mps2,
+                                   &altitude_m,
+                                   &barometer_stddev_m,
+                                   &use_barometer,
+                                   &actuator_fraction);
+            if (parsed_fields != 5 && parsed_fields != 6)
             {
                 fputs("ERROR malformed STEP\n", stdout);
                 fflush(stdout);
                 continue;
             }
 
+            AmbarFlight_SetActuatorFraction(actuator_fraction,
+                                             parsed_fields == 6);
             (void)AmbarFlight_UpdateImu(timestamp_s, acceleration_mps2);
             if (use_barometer != 0)
             {
@@ -182,6 +322,36 @@ int main(int argc, char **argv)
                                                    barometer_stddev_m);
             }
             write_output();
+            continue;
+        }
+
+        if (strcmp(command, "PREDICT") == 0)
+        {
+            float altitude_m;
+            float velocity_mps;
+            float current_fraction;
+            float target_fraction;
+
+            if (sscanf(line,
+                       "%*s %f %f %f %f",
+                       &altitude_m,
+                       &velocity_mps,
+                       &current_fraction,
+                       &target_fraction) != 4)
+            {
+                fputs("ERROR malformed PREDICT\n", stdout);
+                fflush(stdout);
+                continue;
+            }
+
+            printf("PREDICTION %.6f\n",
+                   (double)AmbarFlight_PredictApogee(
+                       altitude_m,
+                       velocity_mps,
+                       current_fraction,
+                       target_fraction,
+                       &config.apogee));
+            fflush(stdout);
             continue;
         }
 

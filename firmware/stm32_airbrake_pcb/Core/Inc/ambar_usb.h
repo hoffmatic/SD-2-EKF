@@ -74,6 +74,17 @@ bool AmbarUsb_QueuePacket(uint8_t type,
                           size_t payload_length,
                           uint32_t time_ms);
 
+/*
+ * Queue a reply whose protocol header explicitly echoes an accepted host
+ * packet sequence. Used only for VARIABLE_HIL request/state correlation; normal
+ * telemetry should continue using the transport-owned sequence above.
+ */
+bool AmbarUsb_QueueCorrelatedPacket(uint8_t type,
+                                    uint16_t sequence,
+                                    const uint8_t *payload,
+                                    size_t payload_length,
+                                    uint32_t time_ms);
+
 /* ===================== READINESS AND DIAGNOSTICS ===================== */
 
 bool AmbarUsb_IsConfigured(void);

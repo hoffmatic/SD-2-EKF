@@ -20,6 +20,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 /* USER CODE BEGIN Includes */
+#include "ambar_features.h"
 
 /* USER CODE END Includes */
 
@@ -481,11 +482,24 @@ void HAL_SPI_MspDeInit(SPI_HandleTypeDef* hspi)
   */
 void HAL_PCD_MspInit(PCD_HandleTypeDef* hpcd)
 {
+#if AMBAR_BUILD_IS_CONTINUOUS_HIL
+  RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
+#endif
   if(hpcd->Instance==USB_DRD_FS)
   {
     /* USER CODE BEGIN USB_DRD_FS_MspInit 0 */
 
     /* USER CODE END USB_DRD_FS_MspInit 0 */
+
+#if AMBAR_BUILD_IS_CONTINUOUS_HIL
+  /** Select the hardware-proven HSI48 source for mandatory HIL USB. */
+    PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_USB;
+    PeriphClkInitStruct.UsbClockSelection = RCC_USBCLKSOURCE_HSI48;
+    if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
+    {
+      Error_Handler();
+    }
+#endif
 
     /* Enable VDDUSB */
     HAL_PWREx_EnableVddUSB();

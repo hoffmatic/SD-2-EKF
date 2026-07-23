@@ -1,0 +1,192 @@
+{
+  "schema_version": 1,
+  "study_status": "PROVISIONAL M5 VARIABLE_HIL SIL - fitted baseline and load-point airbrake authority; replace screening bounds with measured distributions",
+  "sampling_method": "latin_hypercube",
+  "default_master_seed": 20260719,
+  "default_baseline_runs": 2,
+  "default_random_runs": 500,
+  "safety_policy_notes": {
+    "deployment_during_recovery": "Command must be zero by the -5 m/s Recovery threshold. Residual physical deployment is recorded and must retract below 2 percent within 1.60 seconds."
+  },
+  "acceptance": {
+    "passive_reference_tolerance_percent": 10.0,
+    "minimum_effective_apogee_reduction_ft": 10.0,
+    "maximum_commanded_descent_velocity_mps": -5.0,
+    "maximum_recovery_retraction_time_s": 1.60,
+    "required_safety_pass_rate": 1.0,
+    "required_effectiveness_pass_rate": 1.0,
+    "required_target_hit_rate": 0.96,
+    "required_envelope_pass_rate": 1.0,
+    "maximum_p95_absolute_target_error_ft": 100.0,
+    "maximum_worst_absolute_target_error_ft": 200.0
+  },
+  "parameters": [
+    {
+      "name": "rocket_dry_mass_kg",
+      "paths": ["rocket.dry_mass_kg"],
+      "distribution": "triangular",
+      "minimum": 2.85,
+      "mode": 3.0,
+      "maximum": 3.15,
+      "units": "kg",
+      "status": "PROVISIONAL +/-5 percent around the unchanged plant placeholder"
+    },
+    {
+      "name": "rocket_drag_coefficient",
+      "paths": [
+        "rocket.power_on_drag_coefficient",
+        "rocket.power_off_drag_coefficient"
+      ],
+      "distribution": "triangular",
+      "minimum": 0.500142,
+      "mode": 0.526464844,
+      "maximum": 0.552788,
+      "units": "dimensionless",
+      "status": "PROVISIONAL +/-5 percent around the 3379 ft passive fit"
+    },
+    {
+      "name": "center_of_mass_without_motor_m",
+      "paths": ["rocket.center_of_mass_without_motor_m"],
+      "distribution": "uniform",
+      "minimum": 1.05,
+      "maximum": 1.15,
+      "units": "m from tail",
+      "status": "PLACEHOLDER until measured"
+    },
+    {
+      "name": "motor_burn_time_s",
+      "paths": ["motor.burn_time_s"],
+      "distribution": "triangular",
+      "minimum": 1.59,
+      "mode": 1.64,
+      "maximum": 1.69,
+      "units": "s",
+      "status": "PROVISIONAL around the unchanged J420R curve endpoint"
+    },
+    {
+      "name": "motor_total_impulse_ns",
+      "paths": ["motor.total_impulse_ns"],
+      "distribution": "triangular",
+      "minimum": 618.66,
+      "mode": 651.222182,
+      "maximum": 683.78,
+      "units": "N*s",
+      "status": "PROVISIONAL +/-5 percent around the unchanged J420R data"
+    },
+    {
+      "name": "wind_speed_mps",
+      "paths": ["environment.wind_speed_mps"],
+      "distribution": "triangular",
+      "minimum": 0.0,
+      "mode": 3.58,
+      "maximum": 8.0,
+      "units": "m/s",
+      "status": "M5 nominal with screening bounds"
+    },
+    {
+      "name": "wind_from_direction_deg",
+      "paths": ["environment.wind_from_direction_deg"],
+      "distribution": "uniform",
+      "minimum": 180.0,
+      "maximum": 270.0,
+      "units": "deg",
+      "status": "PROVISIONAL"
+    },
+    {
+      "name": "inclination_deg",
+      "paths": ["environment.inclination_deg"],
+      "distribution": "uniform",
+      "minimum": 88.0,
+      "maximum": 90.0,
+      "units": "deg above horizontal",
+      "status": "M5 nominal vertical with up to 2 deg screening error"
+    },
+    {
+      "name": "airbrake_full_incremental_drag_coefficient",
+      "paths": ["airbrakes.drag_coefficient_at_full_deployment"],
+      "distribution": "triangular",
+      "minimum": 1.586416,
+      "mode": 1.86637136,
+      "maximum": 2.146327,
+      "units": "RocketPy incremental Cd referenced to 0.004932493 m^2",
+      "status": "PROVISIONAL +/-15 percent around the M5 load-point conversion; five-point curve shape remains fixed"
+    },
+    {
+      "name": "actuator_open_rate_fraction_per_s",
+      "paths": ["airbrakes.opening_rate_fraction_per_s"],
+      "distribution": "triangular",
+      "minimum": 0.7776,
+      "mode": 0.864,
+      "maximum": 0.9504,
+      "units": "full-stroke fraction/s",
+      "status": "MEASURED CENTER with provisional +/-10 percent screening bounds"
+    },
+    {
+      "name": "actuator_close_rate_fraction_per_s",
+      "paths": ["airbrakes.closing_rate_fraction_per_s"],
+      "distribution": "triangular",
+      "minimum": 0.7596,
+      "mode": 0.844,
+      "maximum": 0.9284,
+      "units": "full-stroke fraction/s",
+      "status": "MEASURED CENTER with provisional +/-10 percent screening bounds"
+    },
+    {
+      "name": "actuator_delay_s",
+      "paths": ["airbrakes.actuator_delay_s"],
+      "distribution": "triangular",
+      "minimum": 0.05,
+      "mode": 0.10,
+      "maximum": 0.20,
+      "units": "s",
+      "status": "PROVISIONAL command-to-motion delay"
+    },
+    {
+      "name": "imu_bias_mps2",
+      "paths": ["sensor_model.accelerometer_bias_mps2"],
+      "distribution": "uniform",
+      "minimum": -0.50,
+      "maximum": 0.50,
+      "units": "m/s^2",
+      "status": "PROVISIONAL"
+    },
+    {
+      "name": "imu_noise_stddev_mps2",
+      "paths": ["sensor_model.accelerometer_noise_std_dev_mps2"],
+      "distribution": "triangular",
+      "minimum": 0.10,
+      "mode": 0.20,
+      "maximum": 0.40,
+      "units": "m/s^2",
+      "status": "PROVISIONAL"
+    },
+    {
+      "name": "barometer_bias_m",
+      "paths": ["sensor_model.barometer_bias_m"],
+      "distribution": "uniform",
+      "minimum": -3.0,
+      "maximum": 3.0,
+      "units": "m",
+      "status": "PROVISIONAL"
+    },
+    {
+      "name": "barometer_noise_stddev_m",
+      "paths": ["sensor_model.barometer_noise_std_dev_m"],
+      "distribution": "triangular",
+      "minimum": 0.75,
+      "mode": 1.50,
+      "maximum": 3.00,
+      "units": "m",
+      "status": "PROVISIONAL"
+    },
+    {
+      "name": "sensor_latency_s",
+      "paths": ["sensor_model.latency_s"],
+      "distribution": "uniform",
+      "minimum": 0.0,
+      "maximum": 0.06,
+      "units": "s",
+      "status": "PROVISIONAL"
+    }
+  ]
+}

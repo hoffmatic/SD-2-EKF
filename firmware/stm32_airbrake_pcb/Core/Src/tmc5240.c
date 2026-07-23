@@ -194,7 +194,7 @@ HAL_StatusTypeDef TMC5240_Init(uint8_t *version)
      * Keep that board-specific allowance out of normal motion-inhibited builds.
      */
     if (detected_version != TMC5240_EXPECTED_VERSION
-#if AMBAR_FEATURE_PRESENTATION_MOTION
+#if AMBAR_ACTUATOR_USE_PROTOTYPE_PROFILE
         && detected_version != TMC5240_PRESENTATION_BOARD_VERSION
 #endif
         )
@@ -240,7 +240,7 @@ HAL_StatusTypeDef TMC5240_ConfigureSafeDefaults(void)
     status = TMC5240_WriteRegister(TMC5240_REG_RAMPMODE, TMC5240_RAMPMODE_POSITION);
     if (status != HAL_OK) { return status; }
 
-#if AMBAR_FEATURE_PRESENTATION_MOTION
+#if AMBAR_ACTUATOR_USE_PROTOTYPE_PROFILE
     /*
      * Register-equivalent settings from the earlier motor prototype that moved
      * successfully: IHOLD=16, IRUN=31, GLOBALSCALER=0 (the chip's full-scale
@@ -355,6 +355,25 @@ HAL_StatusTypeDef TMC5240_ReadActualPosition(int32_t *position_steps)
     }
 
     status = TMC5240_ReadRegister(TMC5240_REG_XACTUAL, &raw);
+    if (status == HAL_OK)
+    {
+        *position_steps = (int32_t)raw;
+    }
+
+    return status;
+}
+
+HAL_StatusTypeDef TMC5240_ReadTargetPosition(int32_t *position_steps)
+{
+    uint32_t raw = 0U;
+    HAL_StatusTypeDef status;
+
+    if (position_steps == 0)
+    {
+        return HAL_ERROR;
+    }
+
+    status = TMC5240_ReadRegister(TMC5240_REG_XTARGET, &raw);
     if (status == HAL_OK)
     {
         *position_steps = (int32_t)raw;

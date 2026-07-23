@@ -84,6 +84,50 @@ metrics, sensitivity results, and representative profiles. See
 `scripts/validate_monte_carlo_output.py` independently recomputes saved counts,
 rates, distributions, joins, worst cases, and snapshot hashes.
 
+Continuous RocketPy replay with one commanded three-rotation actuator sequence
+per case is a separate, guarded HIL workflow:
+
+```text
+Build & Flash AMBAR Normal.cmd
+Build & Flash AMBAR Continuous Test.cmd
+Run Continuous HIL Test.cmd
+```
+
+The firmware build profile is an explicit flash boundary. `NORMAL` rejects
+simulation, HIL override, and arbitrary bench-motion commands.
+`CONTINUOUS_HIL` accepts USB trajectory replay and the separately labeled
+forced `0 -> 153600 -> 0` TMC ramp-state sequence only after profile,
+communications, driver, software-HOME, freshness, and arming checks pass. The
+existing PCB is unchanged: PA0/PA1 remain LEDs, and target/`XACTUAL` are not
+encoder or endpoint-switch evidence. The launcher requires the mechanism to be
+manually fully closed before it declares software HOME once per process. Live evidence is
+stored under `%LOCALAPPDATA%\AMBAR\TestRuns`, queried through SQLite, graphed
+on a localhost dashboard, and exported to atomic CSV files. See
+[docs/continuous_hil_testing.md](docs/continuous_hil_testing.md) and complete
+[docs/continuous_hil_commissioning.md](docs/continuous_hil_commissioning.md)
+before enabling motor power.
+
+The separate `VARIABLE_HIL` profile closes RocketPy causally around the normal
+fractional STM32 controller-to-actuator path and correlated TMC5240 `XACTUAL`
+feedback. It rejects the forced FULL/HOME override used by `CONTINUOUS_HIL`,
+requires an atomic versioned configuration readback before arming, and stores
+hardware-safety and 3,000 ft performance verdicts independently. Because
+`XACTUAL` is not an encoder, its results are labeled TMC ramp-state-coupled HIL.
+See [docs/variable_hil_testing.md](docs/variable_hil_testing.md).
+
+The guarded launcher is separate from the forced-stroke runner. It does not
+open a COM port unless hardware mode, actuator motion, an explicit port, and a
+software-HOME acknowledgement are all supplied:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_variable_hil.ps1 `
+  -Hardware -AllowActuatorMotion -Port COMx -Cycles 25
+```
+
+The launcher prompts for the exact word `CLOSED` before declaring software
+HOME. Do not use the hardware command until the motor-off replay and staged
+25/50/75/100% commissioning in the testing guide are complete.
+
 Browser simulation console:
 
 ```powershell
@@ -188,6 +232,14 @@ flow, file dependency map, and the intended use case for each executable.
   between the airbrake magnetometer and independent recovery GPS.
 - [docs/software_architecture.md](docs/software_architecture.md): how the shared
   flight core, simulations, scripts, and browser UI connect.
+- [docs/continuous_hil_testing.md](docs/continuous_hil_testing.md): firmware
+  profiles, continuous supervisor, datasets, dashboard, and operator controls.
+- [docs/continuous_hil_commissioning.md](docs/continuous_hil_commissioning.md):
+  unchanged-PCB software-zero procedure, cutoff, staged motion, and 100-cycle
+  qualification.
+- [docs/variable_hil_testing.md](docs/variable_hil_testing.md): isolated causal
+  variable-deployment profile, configuration handshake, timing fault rules,
+  calibration gates, and staged 3,000 ft development campaign.
 - [docs/simulation_audit.md](docs/simulation_audit.md): engineering review of
   what each simulation proves, current gaps, and recommended next simulations.
 - [docs/m5_report_change_guide.md](docs/m5_report_change_guide.md):

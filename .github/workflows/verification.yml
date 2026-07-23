@@ -25,6 +25,9 @@ jobs:
           python3 -m unittest discover -s firmware/stm32_airbrake_pcb/HostTests -p "test_*.py"
           python3 firmware/stm32_airbrake_pcb/HostTests/bench_replay_tests.py
 
+      - name: Run continuous-HIL dashboard tests
+        run: python3 scripts/test_continuous_hil_dashboard.py
+
   rocketpy-reference:
     runs-on: ubuntu-latest
     steps:
@@ -47,7 +50,10 @@ jobs:
           cmake --build build --config Release --target ambar_stm32_controller_bridge --parallel
 
       - name: Run Monte Carlo orchestration tests
-        run: python -m unittest sim/rocketpy/test_monte_carlo.py
+        run: >-
+          python -m unittest
+          sim/rocketpy/test_monte_carlo.py
+          sim/rocketpy/test_m5_control.py
 
       - name: Run RocketPy reference checks
         id: rocketpy

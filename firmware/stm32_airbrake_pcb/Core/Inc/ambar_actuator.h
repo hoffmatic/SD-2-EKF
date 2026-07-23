@@ -17,9 +17,9 @@
  *
  * CONFIGURATION
  * -------------
- *   AMBAR_FEATURE_PRESENTATION_MOTION in ambar_features.h identifies the guarded
- *   demo build. Geometry, current, velocity, and timeout assumptions still need
- *   loaded-mechanism validation.
+ *   All build profiles use the same loaded-mechanism geometry. Only the
+ *   CONTINUOUS_HIL profile accepts forced FULL/HOME override commands.
+ *   VARIABLE_HIL follows the normal fractional automatic command path.
  *
  * SAFETY ASSUMPTIONS
  * ------------------
@@ -29,9 +29,10 @@
  *
  * REMAINING FLIGHT WORK
  * ---------------------
- *   HOME is operator-declared because there is no dedicated home switch. Final
- *   current calibration, independent end stops, and loaded retract validation
- *   remain required before flight use.
+ *   The existing PCB has no dedicated HOME or FULL switches. HOME is an
+ *   explicit operator declaration made only while the mechanism is manually
+ *   fully closed and motor energy is off. FULL is the configured three-rotation
+ *   software target. XACTUAL is TMC ramp-generator state, not encoder feedback.
  */
 
 #ifndef AMBAR_ACTUATOR_H
@@ -74,7 +75,22 @@ typedef enum
     AMBAR_ACTUATOR_INHIBIT_ESTOP = 1U << 6U,
 
     /* TMC diagnostic pins or driver-status bits reported a fault. */
-    AMBAR_ACTUATOR_INHIBIT_DIAG_FAULT = 1U << 7U
+    AMBAR_ACTUATOR_INHIBIT_DIAG_FAULT = 1U << 7U,
+
+    /* Software travel geometry or the required 0 -> FULL -> 0 sequence failed. */
+    AMBAR_ACTUATOR_INHIBIT_GEOMETRY_FAULT = 1U << 8U,
+
+    /* Operator has not yet declared the current closed position as HOME. */
+    AMBAR_ACTUATOR_INHIBIT_SOFTWARE_HOME_NOT_READY = 1U << 9U,
+
+    /* This build cannot accept forced HIL physical demand. */
+    AMBAR_ACTUATOR_INHIBIT_HIL_PROFILE = 1U << 10U,
+
+    /* Source compatibility aliases; these do not imply physical switches. */
+    AMBAR_ACTUATOR_INHIBIT_LIMIT_FAULT =
+        AMBAR_ACTUATOR_INHIBIT_GEOMETRY_FAULT,
+    AMBAR_ACTUATOR_INHIBIT_LIMIT_NOT_READY =
+        AMBAR_ACTUATOR_INHIBIT_SOFTWARE_HOME_NOT_READY
 } AmbarActuatorInhibitFlags_t;
 
 typedef enum
@@ -86,8 +102,41 @@ typedef enum
     AMBAR_ACTUATOR_STATE_MOVING = 4,
     AMBAR_ACTUATOR_STATE_RETRACTING = 5,
     AMBAR_ACTUATOR_STATE_FAULT = 6,
-    AMBAR_ACTUATOR_STATE_ESTOP = 7
+    AMBAR_ACTUATOR_STATE_ESTOP = 7,
+    AMBAR_ACTUATOR_STATE_HIL_OVERRIDE = 8
 } AmbarActuatorMachineState_t;
+
+typedef enum
+{
+    AMBAR_ACTUATOR_STROKE_SEQUENCE_UNKNOWN = 0,
+    AMBAR_ACTUATOR_STROKE_SEQUENCE_AT_HOME = 1,
+    AMBAR_ACTUATOR_STROKE_SEQUENCE_LEFT_HOME = 2,
+    AMBAR_ACTUATOR_STROKE_SEQUENCE_AT_FULL = 3,
+    AMBAR_ACTUATOR_STROKE_SEQUENCE_LEFT_FULL = 4,
+    AMBAR_ACTUATOR_STROKE_SEQUENCE_COMPLETE = 5
+} AmbarActuatorStrokeSequence_t;
+
+typedef AmbarActuatorStrokeSequence_t AmbarActuatorLimitSequence_t;
+
+#define AMBAR_ACTUATOR_LIMIT_SEQUENCE_UNKNOWN \
+    AMBAR_ACTUATOR_STROKE_SEQUENCE_UNKNOWN
+#define AMBAR_ACTUATOR_LIMIT_SEQUENCE_HOME_ASSERTED \
+    AMBAR_ACTUATOR_STROKE_SEQUENCE_AT_HOME
+#define AMBAR_ACTUATOR_LIMIT_SEQUENCE_HOME_RELEASED \
+    AMBAR_ACTUATOR_STROKE_SEQUENCE_LEFT_HOME
+#define AMBAR_ACTUATOR_LIMIT_SEQUENCE_FULL_ASSERTED \
+    AMBAR_ACTUATOR_STROKE_SEQUENCE_AT_FULL
+#define AMBAR_ACTUATOR_LIMIT_SEQUENCE_FULL_RELEASED \
+    AMBAR_ACTUATOR_STROKE_SEQUENCE_LEFT_FULL
+#define AMBAR_ACTUATOR_LIMIT_SEQUENCE_COMPLETE \
+    AMBAR_ACTUATOR_STROKE_SEQUENCE_COMPLETE
+
+typedef enum
+{
+    AMBAR_ACTUATOR_HIL_OVERRIDE_OFF = 0,
+    AMBAR_ACTUATOR_HIL_OVERRIDE_FORCE_FULL = 1,
+    AMBAR_ACTUATOR_HIL_OVERRIDE_FORCE_HOME = 2
+} AmbarActuatorHilOverride_t;
 
 /* -------------------- Persistent/runtime actuator configuration -------------------- */
 
@@ -112,7 +161,7 @@ typedef struct
 
 typedef struct
 {
-    /* True only after a future homing routine establishes home_position_steps. */
+    /* True only after the operator declares the manually closed position HOME. */
     bool homed;
 
     /* True when the TMC5240 answered the bring-up check. */
@@ -173,6 +222,32 @@ typedef struct
     /* Position/time checkpoint shared by automatic stall-progress monitoring. */
     int32_t last_progress_position_steps;
     uint32_t last_progress_ms;
+
+    /*
+     * Protocol-compatible software endpoint state. These fields are derived
+     * only from homed/configuration state and TMC5240 XACTUAL. They are not
+     * physical switches or independent position measurements.
+     */
+    uint8_t home_limit_active;      /* legacy name: XACTUAL is at software HOME */
+    uint8_t full_limit_active;      /* legacy name: XACTUAL is at software FULL */
+    uint8_t home_limit_raw;         /* mirrors software HOME state */
+    uint8_t full_limit_raw;         /* mirrors software FULL state */
+    uint8_t limit_sample_started;   /* legacy name: software geometry evaluated */
+    uint8_t limit_state_initialized;/* legacy name: HOME has been declared */
+    uint8_t limits_plausible;       /* legacy name: XACTUAL is in travel range */
+    uint8_t endpoint_sequence_verified;
+    uint8_t endpoint_sequence_state;
+    uint32_t home_limit_changed_ms; /* retained for ABI/source compatibility */
+    uint32_t full_limit_changed_ms; /* retained for ABI/source compatibility */
+    volatile uint8_t limit_irq_pending; /* always zero: no endpoint IRQ exists */
+
+    /* Software HOME declaration and forced HIL stroke state. */
+    uint8_t homing_active; /* retained compatibility state; never powers motion */
+    uint8_t hil_override_mode;
+    uint8_t hil_endpoint_reached;
+    uint8_t normal_motion_limits_applied;
+    uint32_t motion_started_ms;
+    int32_t motion_origin_position_steps;
 } AmbarActuatorState_t;
 
 typedef struct
@@ -220,14 +295,29 @@ bool AmbarActuator_RequestRetract(AmbarActuatorState_t *state);
 bool AmbarActuator_RequestBenchMove(AmbarActuatorState_t *state, int32_t target_steps);
 
 /*
+ * CONTINUOUS_HIL-only recovery for the explicit physical-known-FULL,
+ * TMC-reset-zero condition. It never seeks: with energy off it re-labels the
+ * internal ramp state as configured FULL, then schedules the normal RETRACT.
+ */
+bool AmbarActuator_RequestKnownFullRecoveryRetract(
+    AmbarActuatorState_t *state);
+
+/* HIL-only forced physical demand.  OFF is accepted in every build. */
+bool AmbarActuator_SetHilOverride(AmbarActuatorState_t *state,
+                                  AmbarActuatorHilOverride_t mode);
+
+/*
  * Energy-off stop used by DISARM/SIM_STOP/USB timeout. It cancels any pending
  * manual request and holds XTARGET at the latest known position before DRV_ENN
  * is asserted. This is deliberately different from powered RETRACT.
  */
 bool AmbarActuator_StopAndCancel(AmbarActuatorState_t *state);
 
-/* True only when HOME and every runtime actuator gate are ready for ARM. */
+/* True only when software HOME and every runtime actuator gate are ready. */
 bool AmbarActuator_IsReadyForFlight(const AmbarActuatorState_t *state);
+
+/* Stable protocol-v2 reserved status bits for software geometry/profile state. */
+uint16_t AmbarActuator_GetProtocolStatus(const AmbarActuatorState_t *state);
 
 /* Interrupt callback hook for MOTOR_DIAG0/MOTOR_DIAG1 edges. */
 void AmbarActuator_HandleExtiPin(AmbarActuatorState_t *state, uint16_t GPIO_Pin);

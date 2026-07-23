@@ -16,3 +16,9 @@ out/
 __pycache__/
 *.pyc
 .venv/
+firmware/stm32_airbrake_pcb/Debug/
+firmware/stm32_airbrake_pcb/Release/
+firmware/stm32_airbrake_pcb/Normal/
+firmware/stm32_airbrake_pcb/Continuous_HIL/
+firmware/stm32_airbrake_pcb/Variable_HIL/
+build/cubeide-headless/

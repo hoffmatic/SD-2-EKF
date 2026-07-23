@@ -20,6 +20,7 @@ import json
 import struct
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -246,6 +247,21 @@ class OpenRocketReplayTests(unittest.TestCase):
         self.assertEqual(sequence.take(), 0xFFFF)
         self.assertEqual(sequence.take(), 0)
 
+    def test_live_auto_detection_rejects_multiple_ambar_boards(self) -> None:
+        class Port:
+            def __init__(self, device: str) -> None:
+                self.device = device
+                self.vid = replay.AMBAR_USB_VID
+                self.pid = replay.AMBAR_USB_PID
+
+        class ListPorts:
+            @staticmethod
+            def comports():
+                return [Port("COM4"), Port("COM7")]
+
+        with self.assertRaisesRegex(replay.ReplayError, "multiple AMBAR"):
+            replay._choose_port(ListPorts, None)
+
     @unittest.skipUnless(
         REAL_OPENROCKET_CSV.is_file(),
         "the project copy of the supplied OpenRocket CSV is missing",
@@ -333,9 +349,11 @@ class ActuatorMotionReplayTests(unittest.TestCase):
             monitor: replay.PacketMonitor,
             *,
             fault_on_simulation_sample: int | None = None,
+            prehome_geometry_plausible: bool = True,
         ) -> None:
             self.monitor = monitor
             self.fault_on_simulation_sample = fault_on_simulation_sample
+            self.prehome_geometry_plausible = prehome_geometry_plausible
             self.decoder = protocol.StreamDecoder()
             self.clock: ActuatorMotionReplayTests._FakeClock | None = None
             self.commands: list[int] = []
@@ -350,6 +368,8 @@ class ActuatorMotionReplayTests(unittest.TestCase):
                 | ACTUATOR_FLAG_CONFIG_VALID
             )
             self.current_flags = self.base_flags
+            self.target_steps = 0
+            self.actual_steps = 0
             self.monitor.heartbeat = {
                 "feature_flags": (
                     FEATURE_USB_PROTOCOL
@@ -403,11 +423,32 @@ class ActuatorMotionReplayTests(unittest.TestCase):
             target_steps: int = 0,
             actual_steps: int = 0,
         ) -> None:
+            self.target_steps = target_steps
+            self.actual_steps = actual_steps
+            reserved = protocol.ACTUATOR_STATUS_CONTINUOUS_HIL_PROFILE
+            if (
+                self.prehome_geometry_plausible
+                or self.current_flags & ACTUATOR_FLAG_HOMED
+            ):
+                reserved |= protocol.ACTUATOR_STATUS_LIMITS_PLAUSIBLE
+            if (
+                self.current_flags & ACTUATOR_FLAG_HOMED
+                and target_steps == 0
+                and actual_steps == 0
+            ):
+                reserved |= protocol.ACTUATOR_STATUS_HOME_ACTIVE
             self.monitor.actuator = {
                 "flags": self.current_flags,
                 "machine_state": machine_state,
                 "target_steps": target_steps,
                 "actual_steps": actual_steps,
+                "driver_status": 0,
+                "reserved": reserved,
+                "home_active": bool(
+                    reserved & protocol.ACTUATOR_STATUS_HOME_ACTIVE
+                ),
+                "full_active": False,
+                "limits_plausible": True,
             }
             self.monitor.actuator_count += 1
             self.monitor.actuator_received_s = self._now()
@@ -485,7 +526,11 @@ class ActuatorMotionReplayTests(unittest.TestCase):
                     self.current_flags &= ~(
                         ACTUATOR_FLAG_DRIVER_ENABLED | ACTUATOR_FLAG_MANUAL_PENDING
                     )
-                    self._publish_actuator(machine_state=1)
+                    self._publish_actuator(
+                        machine_state=1,
+                        target_steps=self.target_steps,
+                        actual_steps=self.actual_steps,
+                    )
                 elif command == protocol.CMD_HOME:
                     self.current_flags |= ACTUATOR_FLAG_HOMED
                     self._publish_actuator(machine_state=3)
@@ -594,10 +639,25 @@ class ActuatorMotionReplayTests(unittest.TestCase):
             )
 
     @staticmethod
-    def _monitor(*, features: int, actuator_flags: int) -> replay.PacketMonitor:
+    def _monitor(
+        *,
+        features: int,
+        actuator_flags: int,
+        reserved: int = (
+            protocol.ACTUATOR_STATUS_CONTINUOUS_HIL_PROFILE
+            | protocol.ACTUATOR_STATUS_LIMITS_PLAUSIBLE
+        ),
+    ) -> replay.PacketMonitor:
         monitor = replay.PacketMonitor()
         monitor.heartbeat = {"feature_flags": features}
-        monitor.actuator = {"flags": actuator_flags}
+        monitor.actuator = {
+            "flags": actuator_flags,
+            "machine_state": 1,
+            "driver_status": 0,
+            "reserved": reserved,
+            "target_steps": 0,
+            "actual_steps": 0,
+        }
         return monitor
 
     @staticmethod
@@ -684,10 +744,271 @@ class ActuatorMotionReplayTests(unittest.TestCase):
         homed = self._monitor(
             features=self._motion_features(),
             actuator_flags=self._prehome_actuator_flags() | ACTUATOR_FLAG_HOMED,
+            reserved=(
+                protocol.ACTUATOR_STATUS_CONTINUOUS_HIL_PROFILE
+                | protocol.ACTUATOR_STATUS_LIMITS_PLAUSIBLE
+                | protocol.ACTUATOR_STATUS_HOME_ACTIVE
+            ),
         )
 
         self.assertFalse(replay._actuator_ready_for_flight(unhomed))
         self.assertTrue(replay._actuator_ready_for_flight(homed))
+
+    def test_no_motion_replay_accepts_hil_profile_only_when_override_is_off(self) -> None:
+        monitor = self._monitor(
+            features=self._motion_features(),
+            actuator_flags=self._prehome_actuator_flags(),
+        )
+        self.assertIsNone(replay._enforce_no_motion(monitor))
+
+        assert monitor.actuator is not None
+        monitor.actuator["reserved"] |= (
+            protocol.ACTUATOR_STATUS_HIL_OVERRIDE_ACTIVE
+        )
+        with self.assertRaisesRegex(replay.ReplayError, "override is active"):
+            replay._enforce_no_motion(monitor)
+
+    def test_continuous_hil_preflight_requires_profile_and_plausible_geometry(self) -> None:
+        monitor = replay.PacketMonitor()
+        monitor.heartbeat = {
+            "feature_flags": (
+                FEATURE_USB_PROTOCOL
+                | FEATURE_SIMULATION
+                | FEATURE_ACTUATOR
+                | replay.FEATURE_CONTINUOUS_HIL
+            )
+        }
+        monitor.actuator = {
+            "flags": (
+                ACTUATOR_FLAG_BUILD_ENABLED
+                | ACTUATOR_FLAG_DRIVER_OK
+                | ACTUATOR_FLAG_CONFIG_VALID
+            ),
+            "machine_state": 1,
+            "driver_status": 0,
+            "reserved": (
+                protocol.ACTUATOR_STATUS_CONTINUOUS_HIL_PROFILE
+                | protocol.ACTUATOR_STATUS_LIMITS_PLAUSIBLE
+                | protocol.ACTUATOR_STATUS_HOME_ACTIVE
+            ),
+            "target_steps": 0,
+            "actual_steps": 0,
+        }
+        self.assertIsNone(replay._enforce_continuous_hil(monitor))
+
+        monitor.actuator["reserved"] = (
+            protocol.ACTUATOR_STATUS_CONTINUOUS_HIL_PROFILE
+        )
+        with self.assertRaisesRegex(replay.ReplayError, "geometry is not plausible"):
+            replay._enforce_continuous_hil(monitor)
+        self.assertIsNone(
+            replay._enforce_continuous_hil(
+                monitor,
+                require_geometry=False,
+            )
+        )
+
+        monitor.actuator["reserved"] = (
+            protocol.ACTUATOR_STATUS_CONTINUOUS_HIL_PROFILE
+            | protocol.ACTUATOR_STATUS_LIMITS_PLAUSIBLE
+        )
+        monitor.actuator["driver_status"] = replay.TMC_DRV_STATUS_OTPW
+        with self.assertRaisesRegex(replay.ReplayError, "short/thermal"):
+            replay._enforce_continuous_hil(monitor)
+
+    def test_supervisor_preflight_homes_only_after_static_gates(self) -> None:
+        clock = self._FakeClock()
+        monitor = replay.PacketMonitor(clock=clock)
+        port = self._FakeMotionPort(
+            monitor,
+            prehome_geometry_plausible=False,
+        )
+        port.clock = clock
+
+        class FakeSerialModule:
+            @staticmethod
+            def Serial(*_args, **_kwargs):
+                return port
+
+        def configured_monitor(**kwargs):
+            port.monitor.clock = kwargs["clock"]
+            return port.monitor
+
+        with (
+            mock.patch.object(
+                replay,
+                "_require_serial",
+                return_value=(FakeSerialModule, object()),
+            ),
+            mock.patch.object(replay, "PacketMonitor", side_effect=configured_monitor),
+            mock.patch.object(replay, "_choose_port", return_value="COM_TEST"),
+            mock.patch.object(replay.secrets, "randbelow", return_value=0),
+        ):
+            result = replay.run_continuous_hil_preflight(
+                port_name="COM_TEST",
+                accept_current_position_home=True,
+                clock=clock,
+            )
+
+        self.assertEqual(result["selected_port"], "COM_TEST")
+        self.assertTrue(result["home_verified"])
+        self.assertTrue(result["motor_energy_off"])
+        self.assertEqual(
+            [stage["stage"] for stage in result["stages"]],
+            [
+                "static_gates_passed",
+                "energy_off_confirmed",
+                "software_home_declared",
+                "final_energy_off",
+            ],
+        )
+        self.assertEqual(
+            port.commands,
+            [
+                protocol.CMD_PING,
+                protocol.CMD_REQUEST_SNAPSHOT,
+                protocol.CMD_SET_ARMED,
+                protocol.CMD_SIM_STOP,
+                protocol.CMD_HOME,
+                protocol.CMD_SET_ARMED,
+                protocol.CMD_SIM_STOP,
+            ],
+        )
+
+    def test_supervisor_preflight_requires_ack_before_serial_access(self) -> None:
+        with mock.patch.object(replay, "_require_serial") as require_serial:
+            with self.assertRaisesRegex(
+                replay.ReplayError,
+                "manually fully closed",
+            ):
+                replay.run_continuous_hil_preflight(
+                    port_name="COM_TEST",
+                    accept_current_position_home=False,
+                )
+        require_serial.assert_not_called()
+
+    def test_supervisor_preflight_wrong_profile_never_homes(self) -> None:
+        clock = self._FakeClock()
+        monitor = replay.PacketMonitor(clock=clock)
+        port = self._FakeMotionPort(monitor)
+        port.clock = clock
+        assert monitor.heartbeat is not None
+        monitor.heartbeat["feature_flags"] &= ~FEATURE_PRESENTATION_MOTION
+
+        class FakeSerialModule:
+            @staticmethod
+            def Serial(*_args, **_kwargs):
+                return port
+
+        def configured_monitor(**kwargs):
+            port.monitor.clock = kwargs["clock"]
+            return port.monitor
+
+        with (
+            mock.patch.object(
+                replay,
+                "_require_serial",
+                return_value=(FakeSerialModule, object()),
+            ),
+            mock.patch.object(replay, "PacketMonitor", side_effect=configured_monitor),
+            mock.patch.object(replay, "_choose_port", return_value="COM_TEST"),
+            mock.patch.object(replay.secrets, "randbelow", return_value=0),
+        ):
+            with self.assertRaisesRegex(replay.ReplayError, "missing"):
+                replay.run_continuous_hil_preflight(
+                    port_name="COM_TEST",
+                    accept_current_position_home=True,
+                    clock=clock,
+                )
+
+        self.assertNotIn(protocol.CMD_HOME, port.commands)
+
+    def test_hil_stroke_tracker_requires_software_geometry_and_xactual(self) -> None:
+        tracker = replay.HilStrokeTracker(
+            burn_time_s=1.0,
+            post_burn_margin_s=0.1,
+            full_hold_s=0.5,
+            endpoint_timeout_s=2.0,
+        )
+        telemetry = {"state": 2, "deployment_percent": 25}
+        self.assertEqual(
+            tracker.observe(
+                source_time_s=1.2,
+                telemetry=telemetry,
+                actuator=None,
+                host_now_s=10.0,
+            ),
+            protocol.HIL_OVERRIDE_FORCE_FULL,
+        )
+        full = {
+            "reserved": (
+                protocol.ACTUATOR_STATUS_FULL_ACTIVE
+                | protocol.ACTUATOR_STATUS_LIMITS_PLAUSIBLE
+            ),
+            "target_steps": 153600,
+            "actual_steps": 153600,
+        }
+        self.assertIsNone(
+            tracker.observe(
+                source_time_s=1.3,
+                telemetry=telemetry,
+                actuator=full,
+                host_now_s=10.4,
+            )
+        )
+        self.assertEqual(tracker.state, "AT_FULL")
+        self.assertEqual(
+            tracker.observe(
+                source_time_s=2.0,
+                telemetry={"state": 4, "deployment_percent": 0},
+                actuator=full,
+                host_now_s=10.5,
+            ),
+            protocol.HIL_OVERRIDE_FORCE_HOME,
+        )
+        home = {
+            "reserved": (
+                protocol.ACTUATOR_STATUS_HOME_ACTIVE
+                | protocol.ACTUATOR_STATUS_LIMITS_PLAUSIBLE
+                | protocol.ACTUATOR_STATUS_ENDPOINT_SEQUENCE_VERIFIED
+            ),
+            "target_steps": 0,
+            "actual_steps": 0,
+        }
+        self.assertIsNone(
+            tracker.observe(
+                source_time_s=2.1,
+                telemetry={"state": 4, "deployment_percent": 0},
+                actuator=home,
+                host_now_s=10.9,
+            )
+        )
+        self.assertTrue(tracker.complete)
+        self.assertAlmostEqual(tracker.metrics()["open_time_s"], 0.4)
+        self.assertAlmostEqual(tracker.metrics()["close_time_s"], 0.4)
+
+    def test_hil_stroke_tracker_faults_on_missing_full_endpoint(self) -> None:
+        tracker = replay.HilStrokeTracker(
+            burn_time_s=0.0,
+            endpoint_timeout_s=0.5,
+        )
+        tracker.observe(
+            source_time_s=0.2,
+            telemetry={"state": 2, "deployment_percent": 0},
+            actuator=None,
+            host_now_s=1.0,
+        )
+        with self.assertRaisesRegex(replay.ReplayError, "software FULL/XACTUAL"):
+            tracker.observe(
+                source_time_s=0.8,
+                telemetry={"state": 2, "deployment_percent": 0},
+                actuator={
+                    "reserved": protocol.ACTUATOR_STATUS_LIMITS_PLAUSIBLE,
+                    "target_steps": 153600,
+                    "actual_steps": 153600,
+                },
+                host_now_s=1.6,
+            )
 
     def test_injected_clock_controls_actuator_and_telemetry_freshness(self) -> None:
         clock = self._FakeClock()
@@ -871,6 +1192,45 @@ class ActuatorMotionReplayTests(unittest.TestCase):
             all(after - before >= 0.005 for before, after in zip(sent_times, sent_times[1:]))
         )
 
+    def test_continuous_hil_rebases_transient_lag_without_skip_or_burst(
+        self,
+    ) -> None:
+        clock = self._FakeClock(oversleep_at_s=0.200, oversleep_s=0.060)
+        start_s = clock.now()
+        sent_times: list[float] = []
+        results: list[replay.ReplayDeadlineResult] = []
+
+        for sample_index in range(21):
+            result = replay._wait_for_replay_deadline(
+                clock,
+                lambda: None,
+                start_s=start_s,
+                replay_time_s=sample_index * 0.020,
+                rate_hz=50.0,
+                continuous_hil=True,
+            )
+            results.append(result)
+            start_s += result.rebase_s
+            if not result.skip:
+                sent_times.append(clock.now())
+
+        rebased = [
+            (index, result)
+            for index, result in enumerate(results)
+            if result.rebase_s > 0.0
+        ]
+        self.assertEqual(len(sent_times), 21)
+        self.assertTrue(all(not result.skip for result in results))
+        self.assertEqual(len(rebased), 1)
+        rebase_index, rebase_result = rebased[0]
+        self.assertGreater(rebase_result.lag_s, 0.050)
+        self.assertLess(rebase_result.lag_s, replay.MAX_HOST_SCHEDULE_LAG_S)
+        self.assertAlmostEqual(
+            sent_times[rebase_index + 1] - sent_times[rebase_index],
+            0.020,
+            places=9,
+        )
+
     def test_deadline_failure_finalizes_bundle_after_safe_cleanup(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -902,14 +1262,112 @@ class ActuatorMotionReplayTests(unittest.TestCase):
 
         self.assertEqual(verdict["status"], "FAIL")
         self.assertFalse(verdict["checks"]["run_completed"]["passed"])
-        self.assertEqual(verdict["failure"]["type"], "ReplayError")
+        self.assertFalse(verdict["checks"]["host_deadline"]["passed"])
+        self.assertGreater(
+            verdict["checks"]["host_deadline"]["actual"],
+            replay.MAX_HOST_SCHEDULE_LAG_S,
+        )
+        self.assertTrue(verdict["checks"]["final_driver_off"]["passed"])
+        self.assertTrue(
+            verdict["checks"]["fault_cleanup_energy_off"]["passed"]
+        )
+        self.assertTrue(
+            verdict["safety_cleanup"]["motor_energy_off_verified"]
+        )
+        self.assertIsNotNone(verdict["final_actuator"])
+        self.assertEqual(verdict["failure"]["type"], "ReplayDeadlineError")
         self.assertTrue(any(record["event"] == "safety_cleanup" for record in records))
+        self.assertTrue(
+            any(record["event"] == "safety_cleanup_result" for record in records)
+        )
         self.assertEqual(
             transmitted_commands[-2:],
             [protocol.CMD_SET_ARMED, protocol.CMD_SIM_STOP],
         )
         self.assertNotIn(protocol.CMD_RETRACT, transmitted_commands)
         self.assertEqual(records[-1]["event"], "run_verdict")
+
+    def test_continuous_hil_fault_cleanup_stops_in_place_and_records_fresh_state(
+        self,
+    ) -> None:
+        clock = self._FakeClock()
+        monitor = replay.PacketMonitor(clock=clock)
+        port = self._FakeMotionPort(monitor)
+        port.clock = clock
+        port.current_flags |= (
+            ACTUATOR_FLAG_HOMED | ACTUATOR_FLAG_DRIVER_ENABLED
+        )
+        port._publish_actuator(
+            machine_state=8,
+            target_steps=60321,
+            actual_steps=60284,
+        )
+        assert monitor.actuator is not None
+        monitor.actuator["reserved"] |= (
+            protocol.ACTUATOR_STATUS_HIL_OVERRIDE_ACTIVE
+            | (
+                protocol.HIL_OVERRIDE_FORCE_HOME
+                << protocol.ACTUATOR_STATUS_HIL_OVERRIDE_SHIFT
+            )
+        )
+        records: list[dict] = []
+        observer = reporting.ReplayRunObserver(
+            clock=clock,
+            event_sink=lambda record: records.append(dict(record)),
+        )
+        observer.start({"test": True})
+        monitor.observer = observer
+
+        cleanup = replay._perform_safety_cleanup(
+            port,
+            monitor,
+            replay.SequenceCounter(seed=1),
+            observer,
+            clock,
+            continuous_hil=True,
+        )
+        observer.finalize({"status": "FAIL", "passed": False})
+
+        self.assertEqual(
+            port.commands,
+            [
+                protocol.CMD_HIL_SET_OVERRIDE,
+                protocol.CMD_SET_ARMED,
+                protocol.CMD_SIM_STOP,
+            ],
+        )
+        self.assertNotIn(protocol.CMD_RETRACT, port.commands)
+        self.assertEqual(
+            cleanup["policy"],
+            "stop_in_place_no_automatic_home_after_fault",
+        )
+        self.assertTrue(cleanup["fresh_actuator_status_received"])
+        self.assertTrue(cleanup["motor_energy_off_verified"])
+        self.assertEqual(
+            cleanup["pre_cleanup_actuator"]["actual_steps"],
+            60284,
+        )
+        self.assertEqual(
+            cleanup["post_cleanup_actuator"]["actual_steps"],
+            60284,
+        )
+        self.assertEqual(
+            cleanup["post_cleanup_actuator"]["target_steps"],
+            60321,
+        )
+        self.assertEqual(
+            cleanup["post_cleanup_actuator"]["flags"]
+            & ACTUATOR_FLAG_DRIVER_ENABLED,
+            0,
+        )
+        self.assertEqual(
+            cleanup["post_cleanup_actuator"]["reserved"]
+            & protocol.ACTUATOR_STATUS_HIL_OVERRIDE_ACTIVE,
+            0,
+        )
+        self.assertTrue(
+            any(record["event"] == "safety_cleanup_result" for record in records)
+        )
 
     def test_verdict_rejects_decoder_and_heartbeat_counter_increases(self) -> None:
         clock = self._FakeClock()
@@ -993,6 +1451,23 @@ class ActuatorMotionReplayTests(unittest.TestCase):
                 self.assertEqual(check["actual"], expected_ratio)
                 self.assertEqual(verdict["passed"], expected_pass)
 
+        continuous = replay._build_live_verdict(
+            ready_monitor(),
+            completed=True,
+            failure=None,
+            no_arm=False,
+            allow_actuator_motion=True,
+            max_schedule_lag_s=0.001,
+            skipped_host_samples=1,
+            sent_host_samples=99,
+            continuous_hil=True,
+        )
+        self.assertFalse(continuous["checks"]["host_skip_ratio"]["passed"])
+        self.assertEqual(
+            continuous["checks"]["host_skip_ratio"]["expected"],
+            "0 skipped samples",
+        )
+
     def test_packet_monitor_mirrors_decoded_telemetry_to_gui(self) -> None:
         fake_socket = self._FakeUdpSocket()
         clock = self._FakeClock()
@@ -1055,6 +1530,111 @@ class ActuatorMotionReplayTests(unittest.TestCase):
             "stm32_device",
         )
         self.assertEqual(telemetry_records[0]["decoded"]["deployment_percent"], 50)
+
+    def test_slow_evidence_sink_never_blocks_replay_emits_and_drains_fifo(
+        self,
+    ) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        bundle = Path(temporary.name) / "async-evidence"
+
+        class SlowSink:
+            def __init__(self) -> None:
+                self.records: list[dict[str, object]] = []
+                self.flushed = False
+                self.closed = False
+
+            def __call__(self, record) -> None:
+                time.sleep(0.020)
+                self.records.append(dict(record))
+
+            def flush(self) -> None:
+                self.flushed = True
+
+            def close(self) -> None:
+                self.closed = True
+
+        sink = SlowSink()
+        observer = reporting.ReplayRunObserver(
+            clock=reporting.PerfCounterClock(),
+            bundle_dir=bundle,
+            event_sink=sink,
+            flush_interval_s=60.0,
+        )
+        observer.start({"test": True})
+        mutable = {"value": 1}
+        started = time.perf_counter()
+        for index in range(40):
+            observer.emit("sample", sample_index=index, mutable=mutable)
+        emit_elapsed = time.perf_counter() - started
+        mutable["value"] = 2
+        observer.finalize({"status": "PASS", "passed": True})
+
+        records = [
+            json.loads(line)
+            for line in (bundle / "packets.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        self.assertLess(emit_elapsed, 0.150)
+        self.assertEqual(
+            [record["event_index"] for record in records],
+            list(range(42)),
+        )
+        self.assertEqual(
+            [record["event_index"] for record in sink.records],
+            list(range(42)),
+        )
+        self.assertEqual(records[1]["mutable"]["value"], 1)
+        self.assertEqual(records[-1]["event"], "run_verdict")
+        self.assertTrue(sink.flushed)
+        self.assertTrue(sink.closed)
+
+    def test_async_evidence_failure_propagates_and_marks_verdict_failed(
+        self,
+    ) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        bundle = Path(temporary.name) / "failed-evidence"
+
+        class FailingSink:
+            def __call__(self, record) -> None:
+                if record["event"] == "sample":
+                    raise OSError("simulated SQLite write failure")
+
+        observer = reporting.ReplayRunObserver(
+            clock=reporting.PerfCounterClock(),
+            bundle_dir=bundle,
+            event_sink=FailingSink(),
+        )
+        observer.start({"test": True})
+        observer.emit("sample", sample_index=0)
+        with self.assertRaisesRegex(
+            reporting.ReplayEvidenceWriterError,
+            "simulated SQLite write failure",
+        ):
+            observer.finalize({"status": "PASS", "passed": True})
+
+        verdict = json.loads(
+            (bundle / "verdict.json").read_text(encoding="utf-8")
+        )
+        records = [
+            json.loads(line)
+            for line in (bundle / "packets.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        self.assertEqual(verdict["status"], "FAIL")
+        self.assertFalse(verdict["passed"])
+        self.assertEqual(
+            verdict["failure"]["type"],
+            "ReplayEvidenceWriterError",
+        )
+        self.assertFalse(verdict["checks"]["evidence_writer"]["passed"])
+        self.assertEqual(
+            [record["event_index"] for record in records],
+            sorted(record["event_index"] for record in records),
+        )
 
 
 if __name__ == "__main__":

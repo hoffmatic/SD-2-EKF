@@ -21,6 +21,7 @@ HAL_StatusTypeDef TMC5240_SetMotionLimits(uint32_t max_velocity_steps_per_s,
 HAL_StatusTypeDef TMC5240_SetActualPosition(int32_t position_steps);
 HAL_StatusTypeDef TMC5240_SetTargetPosition(int32_t target_steps);
 HAL_StatusTypeDef TMC5240_ReadActualPosition(int32_t *position_steps);
+HAL_StatusTypeDef TMC5240_ReadTargetPosition(int32_t *position_steps);
 HAL_StatusTypeDef TMC5240_ReadDriverStatus(uint32_t *driver_status);
 uint8_t TMC5240_DriverStatusHasHardFault(uint32_t driver_status);
 HAL_StatusTypeDef TMC5240_Stop(void);

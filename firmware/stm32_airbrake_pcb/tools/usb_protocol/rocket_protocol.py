@@ -30,6 +30,7 @@ from dataclasses import dataclass
 import struct
 import time
 from typing import Iterable
+import zlib
 
 
 # ---------------------------------------------------------------------------
@@ -48,10 +49,13 @@ MAX_FRAME = 66
 PKT_TELEMETRY = 0x01
 PKT_EVENT = 0x02
 PKT_ACTUATOR_STATUS = 0x03
+PKT_VARIABLE_HIL_STATE = 0x04
+PKT_VARIABLE_HIL_CONFIG = 0x05
 PKT_COMMAND = 0x10
 PKT_ACK = 0x11
 PKT_HEARTBEAT = 0x12
 PKT_SIMULATION = 0x20
+PKT_VARIABLE_HIL_CONFIG_UPLOAD = 0x21
 
 CMD_NOP = 0x00
 CMD_PING = 0x01
@@ -66,6 +70,10 @@ CMD_SAVE_CONFIG = 0x19
 CMD_BENCH_MOVE_STEPS = 0x1A
 CMD_SIM_START = 0x20
 CMD_SIM_STOP = 0x21
+CMD_HIL_SET_OVERRIDE = 0x22
+CMD_VARIABLE_HIL_GET_CONFIG = 0x23
+CMD_VARIABLE_HIL_CONFIG_UPLOAD = 0x24
+CMD_RECOVER_KNOWN_FULL_RETRACT = 0x25
 CMD_START_LOG = 0x30
 CMD_STOP_LOG = 0x31
 CMD_ERASE_LOG = 0x32
@@ -82,6 +90,61 @@ SIM_ALTITUDE_VALID = 1 << 0
 SIM_ACCELERATION_VALID = 1 << 1
 SIM_VELOCITY_VALID = 1 << 2
 SIM_END_OF_STREAM = 1 << 3
+
+HIL_OVERRIDE_OFF = 0
+HIL_OVERRIDE_FORCE_FULL = 1
+HIL_OVERRIDE_FORCE_HOME = 2
+
+# Required payload for the CONTINUOUS_HIL-only reset-zero recovery command.
+RECOVER_KNOWN_FULL_MAGIC = b"FULL"
+
+# Protocol-v2 keeps the original reserved-bit positions so packet size and
+# older captures remain compatible. In the switch-free build these bits
+# describe software geometry derived from the TMC5240 ramp state; they are not
+# physical switch or encoder evidence.
+ACTUATOR_STATUS_SOFTWARE_HOME_ACTIVE = 1 << 0
+ACTUATOR_STATUS_SOFTWARE_FULL_ACTIVE = 1 << 1
+ACTUATOR_STATUS_GEOMETRY_PLAUSIBLE = 1 << 2
+ACTUATOR_STATUS_HIL_OVERRIDE_ACTIVE = 1 << 3
+ACTUATOR_STATUS_HIL_OVERRIDE_SHIFT = 4
+ACTUATOR_STATUS_HIL_OVERRIDE_MASK = 0x0030
+ACTUATOR_STATUS_CONTINUOUS_HIL_PROFILE = 1 << 6
+ACTUATOR_STATUS_STROKE_SEQUENCE_VERIFIED = 1 << 7
+ACTUATOR_STATUS_VARIABLE_HIL_PROFILE = 1 << 8
+
+# RocketActuatorStatusPayload.flags (distinct from the reserved status bits).
+ACTUATOR_FLAG_DRIVER_ENABLED = 1 << 4
+
+VARIABLE_HIL_STATE_PAYLOAD_SIZE = 44
+VARIABLE_HIL_CONFIG_PAYLOAD_SIZE = 52
+VARIABLE_HIL_CONFIG_VERSION = 1
+VARIABLE_HIL_CDA_POINT_COUNT = 5
+FRACTION_U16_FULL_SCALE = 65535
+FEATURE_ACTUATOR = 1 << 3
+FEATURE_USB_PROTOCOL = 1 << 10
+FEATURE_SIMULATION = 1 << 11
+FEATURE_CONTINUOUS_HIL = 1 << 14
+FEATURE_VARIABLE_HIL = 1 << 16
+VARIABLE_HIL_FEEDBACK_UNKNOWN = 0
+VARIABLE_HIL_FEEDBACK_TMC5240_XACTUAL = 1
+
+VARIABLE_HIL_FLAG_DRIVER_OK = 1 << 0
+VARIABLE_HIL_FLAG_DRIVER_ENABLED = 1 << 1
+VARIABLE_HIL_FLAG_CONFIG_VALID = 1 << 2
+VARIABLE_HIL_FLAG_SIM_ACTIVE = 1 << 3
+VARIABLE_HIL_FLAG_SIM_FRESH = 1 << 4
+VARIABLE_HIL_FLAG_ARMED = 1 << 5
+VARIABLE_HIL_FLAG_SOFTWARE_HOME = 1 << 6
+VARIABLE_HIL_FLAG_TARGET_REACHABLE = 1 << 7
+
+# Compatibility aliases for existing protocol-v2 consumers. New code and UI
+# text should use the software-geometry names above.
+ACTUATOR_STATUS_HOME_ACTIVE = ACTUATOR_STATUS_SOFTWARE_HOME_ACTIVE
+ACTUATOR_STATUS_FULL_ACTIVE = ACTUATOR_STATUS_SOFTWARE_FULL_ACTIVE
+ACTUATOR_STATUS_LIMITS_PLAUSIBLE = ACTUATOR_STATUS_GEOMETRY_PLAUSIBLE
+ACTUATOR_STATUS_ENDPOINT_SEQUENCE_VERIFIED = (
+    ACTUATOR_STATUS_STROKE_SEQUENCE_VERIFIED
+)
 
 
 class ProtocolError(ValueError):
@@ -102,6 +165,32 @@ class Packet:
     sequence: int
     time_ms: int
     payload: bytes
+
+
+@dataclass(frozen=True)
+class VariableHilConfig:
+    """Canonical atomic controller configuration shared with VARIABLE_HIL."""
+
+    calibration_version: int
+    control_mode: int
+    predictor_mode: int
+    target_apogee_m: float
+    mission_tolerance_m: float
+    control_deadband_m: float
+    full_deployment_error_m: float
+    minimum_deploy_altitude_m: float
+    minimum_flight_time_s: float
+    predictive_update_period_s: float
+    coast_mass_kg: float
+    maximum_deploy_fraction: float
+    deployment_hysteresis_fraction: float
+    deployment_cda_m2: tuple[float, float, float, float, float]
+    sea_level_air_density_kgpm3: float
+    density_scale_height_m: float
+    launch_site_elevation_m: float
+    actuator_delay_s: float
+    actuator_open_rate_fraction_per_s: float
+    actuator_close_rate_fraction_per_s: float
 
 
 def crc16_ccitt_false(data: bytes) -> int:
@@ -292,6 +381,118 @@ def simulation_frame(
     return encode_frame(PKT_SIMULATION, sequence, time_ms, payload)
 
 
+def hil_override_frame(
+    sequence: int,
+    mode: int,
+    *,
+    time_ms: int | None = None,
+) -> bytes:
+    """Encode the fixed one-byte continuous-HIL override command.
+
+    Firmware remains the authority for arming, freshness, software geometry,
+    driver health, and build-profile gating. This helper only prevents
+    malformed or future-reserved override values from reaching the wire.
+    """
+
+    if mode not in (
+        HIL_OVERRIDE_OFF,
+        HIL_OVERRIDE_FORCE_FULL,
+        HIL_OVERRIDE_FORCE_HOME,
+    ):
+        raise ProtocolError(f"unsupported HIL override mode {mode}")
+    return command_frame(
+        sequence,
+        CMD_HIL_SET_OVERRIDE,
+        bytes((mode,)),
+        time_ms=time_ms,
+    )
+
+
+def recover_known_full_retract_frame(
+    sequence: int,
+    *,
+    time_ms: int | None = None,
+) -> bytes:
+    """Encode the explicit CONTINUOUS_HIL known-FULL recovery command.
+
+    The firmware remains responsible for profile, disarmed/SIM_STOP, driver-off,
+    health, unhomed, and reset-zero ramp-state gates.
+    """
+
+    return command_frame(
+        sequence,
+        CMD_RECOVER_KNOWN_FULL_RETRACT,
+        RECOVER_KNOWN_FULL_MAGIC,
+        time_ms=time_ms,
+    )
+
+
+def _scaled_int(name: str, value: float, scale: float, lower: int, upper: int) -> int:
+    scaled = round(value * scale)
+    if not lower <= scaled <= upper:
+        raise ProtocolError(
+            f"{name}={value!r} is outside encodable range "
+            f"[{lower / scale}, {upper / scale}]"
+        )
+    return scaled
+
+
+def encode_variable_hil_config_payload(config: VariableHilConfig) -> bytes:
+    """Encode one versioned, self-CRC'd atomic VARIABLE_HIL configuration."""
+
+    if len(config.deployment_cda_m2) != VARIABLE_HIL_CDA_POINT_COUNT:
+        raise ProtocolError("deployment CdA curve must contain five points")
+    fields = (
+        VARIABLE_HIL_CONFIG_VERSION,
+        config.control_mode,
+        config.predictor_mode,
+        VARIABLE_HIL_CDA_POINT_COUNT,
+        config.calibration_version,
+        _scaled_int("target_apogee_m", config.target_apogee_m, 10.0, 0, 0xFFFF),
+        _scaled_int("mission_tolerance_m", config.mission_tolerance_m, 10.0, 0, 0xFFFF),
+        _scaled_int("control_deadband_m", config.control_deadband_m, 100.0, 0, 0xFFFF),
+        _scaled_int("full_deployment_error_m", config.full_deployment_error_m, 10.0, 0, 0xFFFF),
+        _scaled_int("minimum_deploy_altitude_m", config.minimum_deploy_altitude_m, 10.0, 0, 0xFFFF),
+        _scaled_int("minimum_flight_time_s", config.minimum_flight_time_s, 100.0, 0, 0xFFFF),
+        _scaled_int("predictive_update_period_s", config.predictive_update_period_s, 1000.0, 0, 0xFFFF),
+        _scaled_int("coast_mass_kg", config.coast_mass_kg, 1000.0, 0, 0xFFFF),
+        _scaled_int("maximum_deploy_fraction", config.maximum_deploy_fraction, 255.0, 0, 0xFF),
+        _scaled_int("deployment_hysteresis_fraction", config.deployment_hysteresis_fraction, 1000.0, 0, 0xFF),
+        *(
+            _scaled_int(f"deployment_cda_m2[{index}]", value, 1_000_000.0, 0, 0xFFFF)
+            for index, value in enumerate(config.deployment_cda_m2)
+        ),
+        _scaled_int("sea_level_air_density_kgpm3", config.sea_level_air_density_kgpm3, 10_000.0, 0, 0xFFFF),
+        _scaled_int("density_scale_height_m", config.density_scale_height_m, 1.0, 0, 0xFFFF),
+        _scaled_int("launch_site_elevation_m", config.launch_site_elevation_m, 10.0, -0x8000, 0x7FFF),
+        _scaled_int("actuator_delay_s", config.actuator_delay_s, 1000.0, 0, 0xFFFF),
+        _scaled_int("actuator_open_rate_fraction_per_s", config.actuator_open_rate_fraction_per_s, 1000.0, 0, 0xFFFF),
+        _scaled_int("actuator_close_rate_fraction_per_s", config.actuator_close_rate_fraction_per_s, 1000.0, 0, 0xFFFF),
+    )
+    body = struct.pack("<BBBBI8HBB5HHHhHHH", *fields)
+    if len(body) != VARIABLE_HIL_CONFIG_PAYLOAD_SIZE - 4:
+        raise AssertionError("VARIABLE_HIL config body layout drifted")
+    return body + struct.pack("<I", zlib.crc32(body) & 0xFFFFFFFF)
+
+
+def variable_hil_config_upload_frame(
+    sequence: int,
+    config: VariableHilConfig,
+    *,
+    time_ms: int | None = None,
+) -> bytes:
+    """Upload an atomic config; firmware accepts it only in its energy-off state."""
+
+    if time_ms is None:
+        time_ms = int(time.monotonic() * 1000)
+    return encode_frame(
+        PKT_VARIABLE_HIL_CONFIG_UPLOAD,
+        sequence,
+        time_ms,
+        encode_variable_hil_config_payload(config),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Typed receive-payload decoders
 # ---------------------------------------------------------------------------
@@ -354,12 +555,13 @@ def decode_telemetry(payload: bytes) -> dict[str, int | float]:
     }
 
 
-def decode_actuator_status(payload: bytes) -> dict[str, int]:
+def decode_actuator_status(payload: bytes) -> dict[str, int | bool]:
     """Decode actuator intent, ramp position, inhibit flags, and driver state."""
 
     if len(payload) != 24:
         raise ProtocolError("actuator status payload must be 24 bytes")
     values = struct.unpack("<IIiiIBBH", payload)
+    reserved = values[7]
     return {
         "actuator_inhibit_flags": values[0],
         "flight_inhibit_flags": values[1],
@@ -368,7 +570,125 @@ def decode_actuator_status(payload: bytes) -> dict[str, int]:
         "driver_status": values[4],
         "machine_state": values[5],
         "flags": values[6],
-        "reserved": values[7],
+        "driver_enabled": bool(values[6] & ACTUATOR_FLAG_DRIVER_ENABLED),
+        "reserved": reserved,
+        "software_home_active": bool(
+            reserved & ACTUATOR_STATUS_SOFTWARE_HOME_ACTIVE
+        ),
+        "software_full_active": bool(
+            reserved & ACTUATOR_STATUS_SOFTWARE_FULL_ACTIVE
+        ),
+        "geometry_plausible": bool(
+            reserved & ACTUATOR_STATUS_GEOMETRY_PLAUSIBLE
+        ),
+        "hil_override_active": bool(
+            reserved & ACTUATOR_STATUS_HIL_OVERRIDE_ACTIVE
+        ),
+        "hil_override_mode": (
+            reserved & ACTUATOR_STATUS_HIL_OVERRIDE_MASK
+        )
+        >> ACTUATOR_STATUS_HIL_OVERRIDE_SHIFT,
+        "continuous_hil_profile": bool(
+            reserved & ACTUATOR_STATUS_CONTINUOUS_HIL_PROFILE
+        ),
+        "stroke_sequence_verified": bool(
+            reserved & ACTUATOR_STATUS_STROKE_SEQUENCE_VERIFIED
+        ),
+        "variable_hil_profile": bool(
+            reserved & ACTUATOR_STATUS_VARIABLE_HIL_PROFILE
+        ),
+        # Legacy dictionary keys remain available for protocol-v2 callers.
+        "home_active": bool(
+            reserved & ACTUATOR_STATUS_SOFTWARE_HOME_ACTIVE
+        ),
+        "full_active": bool(
+            reserved & ACTUATOR_STATUS_SOFTWARE_FULL_ACTIVE
+        ),
+        "limits_plausible": bool(
+            reserved & ACTUATOR_STATUS_GEOMETRY_PLAUSIBLE
+        ),
+        "endpoint_sequence_verified": bool(
+            reserved & ACTUATOR_STATUS_STROKE_SEQUENCE_VERIFIED
+        ),
+    }
+
+
+def decode_variable_hil_state(payload: bytes) -> dict[str, int | float | bool]:
+    """Decode one causal state reply correlated to a simulation input sequence."""
+
+    if len(payload) != VARIABLE_HIL_STATE_PAYLOAD_SIZE:
+        raise ProtocolError("VARIABLE_HIL state payload must be 44 bytes")
+    values = struct.unpack("<HHHHiiIIIIiiBBBB", payload)
+    flags = values[14]
+    return {
+        "simulation_sequence": values[0],
+        "controller_requested_fraction": values[1] / FRACTION_U16_FULL_SCALE,
+        "actuator_target_fraction": values[2] / FRACTION_U16_FULL_SCALE,
+        "xactual_fraction": values[3] / FRACTION_U16_FULL_SCALE,
+        "target_steps": values[4],
+        "actual_steps": values[5],
+        "flight_inhibit_flags": values[6],
+        "actuator_inhibit_flags": values[7],
+        "driver_status": values[8],
+        "config_crc32": values[9],
+        "closed_predicted_apogee_m": values[10] * 0.1,
+        "full_predicted_apogee_m": values[11] * 0.1,
+        "phase": values[12],
+        "machine_state": values[13],
+        "state_flags": flags,
+        "feedback_source": values[15],
+        "driver_ok": bool(flags & VARIABLE_HIL_FLAG_DRIVER_OK),
+        "driver_enabled": bool(flags & VARIABLE_HIL_FLAG_DRIVER_ENABLED),
+        "config_valid": bool(flags & VARIABLE_HIL_FLAG_CONFIG_VALID),
+        "simulation_active": bool(flags & VARIABLE_HIL_FLAG_SIM_ACTIVE),
+        "simulation_fresh": bool(flags & VARIABLE_HIL_FLAG_SIM_FRESH),
+        "armed": bool(flags & VARIABLE_HIL_FLAG_ARMED),
+        "software_home": bool(flags & VARIABLE_HIL_FLAG_SOFTWARE_HOME),
+        "target_reachable": bool(flags & VARIABLE_HIL_FLAG_TARGET_REACHABLE),
+    }
+
+
+def decode_variable_hil_config(payload: bytes) -> dict[str, int | float | tuple[float, ...]]:
+    """Decode and CRC-check the complete board config readback."""
+
+    if len(payload) != VARIABLE_HIL_CONFIG_PAYLOAD_SIZE:
+        raise ProtocolError("VARIABLE_HIL config payload must be 52 bytes")
+    received_crc = struct.unpack_from("<I", payload, 48)[0]
+    calculated_crc = zlib.crc32(payload[:48]) & 0xFFFFFFFF
+    if received_crc != calculated_crc:
+        raise ProtocolError(
+            f"VARIABLE_HIL config CRC mismatch: received 0x{received_crc:08X}, "
+            f"calculated 0x{calculated_crc:08X}"
+        )
+    values = struct.unpack("<BBBBI8HBB5HHHhHHHI", payload)
+    if values[0] != VARIABLE_HIL_CONFIG_VERSION:
+        raise ProtocolError(f"unsupported VARIABLE_HIL config version {values[0]}")
+    if values[3] != VARIABLE_HIL_CDA_POINT_COUNT:
+        raise ProtocolError(f"unsupported CdA point count {values[3]}")
+    return {
+        "schema_version": values[0],
+        "control_mode": values[1],
+        "predictor_mode": values[2],
+        "cda_point_count": values[3],
+        "calibration_version": values[4],
+        "target_apogee_m": values[5] * 0.1,
+        "mission_tolerance_m": values[6] * 0.1,
+        "control_deadband_m": values[7] * 0.01,
+        "full_deployment_error_m": values[8] * 0.1,
+        "minimum_deploy_altitude_m": values[9] * 0.1,
+        "minimum_flight_time_s": values[10] * 0.01,
+        "predictive_update_period_s": values[11] * 0.001,
+        "coast_mass_kg": values[12] * 0.001,
+        "maximum_deploy_fraction": values[13] / 255.0,
+        "deployment_hysteresis_fraction": values[14] * 0.001,
+        "deployment_cda_m2": tuple(value * 1e-6 for value in values[15:20]),
+        "sea_level_air_density_kgpm3": values[20] * 1e-4,
+        "density_scale_height_m": float(values[21]),
+        "launch_site_elevation_m": values[22] * 0.1,
+        "actuator_delay_s": values[23] * 0.001,
+        "actuator_open_rate_fraction_per_s": values[24] * 0.001,
+        "actuator_close_rate_fraction_per_s": values[25] * 0.001,
+        "config_crc32": values[26],
     }
 
 

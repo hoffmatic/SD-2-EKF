@@ -53,6 +53,7 @@ from run_rocketpy_sim import (
     FEET_TO_METERS,
     METERS_TO_FEET,
     derive_phase_transitions,
+    deep_merge,
     flight_apogee_agl_m,
     load_config,
     run_closed_loop,
@@ -1507,7 +1508,12 @@ def main() -> int:
         description="Run baseline and seeded RocketPy/STM32-C Monte Carlo campaigns."
     )
     parser.add_argument("--bridge", type=Path, required=True)
-    parser.add_argument("--base-overrides", type=Path)
+    parser.add_argument(
+        "--base-overrides",
+        type=Path,
+        action="append",
+        help="JSON overlay; repeat to apply a later small controller overlay",
+    )
     parser.add_argument("--study-config", type=Path, default=DEFAULT_STUDY_CONFIG)
     parser.add_argument("--baseline-runs", type=int)
     parser.add_argument("--random-runs", type=int)
@@ -1539,7 +1545,11 @@ def main() -> int:
     if not bridge_path.is_file():
         parser.error(f"controller bridge not found: {bridge_path}")
 
-    base_config = load_config(args.base_overrides.resolve() if args.base_overrides else None)
+    override_paths = [path.resolve() for path in (args.base_overrides or [])]
+    base_config = load_config(override_paths[0] if override_paths else None)
+    for override_path in override_paths[1:]:
+        with override_path.open("r", encoding="utf-8") as handle:
+            base_config = deep_merge(base_config, json.load(handle))
     parameters = study_config["parameters"]
     # Validate every path before creating the campaign directory or running an
     # expensive case.  The same check prevents a typo from being silently absent
@@ -1659,8 +1669,7 @@ def main() -> int:
         ROOT / "scripts" / "build_stm32_controller_bridge.ps1",
         ROOT / "scripts" / "run_monte_carlo.ps1",
     ]
-    if args.base_overrides:
-        material_paths.append(args.base_overrides.resolve())
+    material_paths.extend(override_paths)
     input_snapshots = snapshot_material_inputs(output_dir, material_paths)
     bridge_snapshot_record = next(
         record
@@ -1692,12 +1701,16 @@ def main() -> int:
             "base_config_sha256": sha256_file(
                 MODEL_DIR / "ambar_reference_config.json"
             ),
-            "base_overrides": str(args.base_overrides.resolve())
-            if args.base_overrides
+            "base_overrides": str(override_paths[0])
+            if override_paths
             else None,
-            "base_overrides_sha256": sha256_file(args.base_overrides.resolve())
-            if args.base_overrides
+            "base_overrides_sha256": sha256_file(override_paths[0])
+            if override_paths
             else None,
+            "base_override_chain": [str(path) for path in override_paths],
+            "base_override_chain_sha256": [
+                sha256_file(path) for path in override_paths
+            ],
             "resolved_base_config_sha256": sha256_bytes(
                 canonical_json_bytes(base_config)
             ),

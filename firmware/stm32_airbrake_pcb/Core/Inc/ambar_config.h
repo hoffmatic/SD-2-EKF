@@ -44,7 +44,8 @@ extern "C" {
 #define AMBAR_CONFIG_MAGIC   0x414D4243UL
 
 /** Increment when the binary structure layout changes incompatibly. */
-#define AMBAR_CONFIG_VERSION 2UL
+/* V3 expands AmbarFlightConfig_t with the calibrated variable-control model. */
+#define AMBAR_CONFIG_VERSION 3UL
 
 /** Redundant record sectors; logging begins later and never overlaps them. */
 #define AMBAR_CONFIG_PRIMARY_ADDR 0x00000000UL
@@ -61,7 +62,9 @@ typedef enum
     /** A candidate record failed its CRC check. */
     AMBAR_CONFIG_STATUS_CRC_ERROR = 1U << 3U,
     /** A candidate record contained an out-of-range field. */
-    AMBAR_CONFIG_STATUS_VALUE_ERROR = 1U << 4U
+    AMBAR_CONFIG_STATUS_VALUE_ERROR = 1U << 4U,
+    /** A valid V2 record was mapped into V3 RAM without writing flash. */
+    AMBAR_CONFIG_STATUS_MIGRATED_V2 = 1U << 5U
 } AmbarConfigStatusFlags_t;
 
 typedef struct

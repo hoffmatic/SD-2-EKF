@@ -64,7 +64,15 @@ extern "C" {
 #define ROCKET_ACK_PAYLOAD_SIZE            6u
 #define ROCKET_SIMULATION_PAYLOAD_SIZE     16u
 #define ROCKET_ACTUATOR_STATUS_PAYLOAD_SIZE 24u
+#define ROCKET_VARIABLE_HIL_STATE_PAYLOAD_SIZE 44u
+#define ROCKET_VARIABLE_HIL_CONFIG_PAYLOAD_SIZE 52u
 #define ROCKET_HEARTBEAT_PAYLOAD_SIZE       8u
+#define ROCKET_VARIABLE_HIL_CONFIG_VERSION  1u
+#define ROCKET_VARIABLE_HIL_CDA_POINT_COUNT 5u
+#define ROCKET_FRACTION_U16_FULL_SCALE      65535u
+/* ASCII "FULL" encoded little-endian as bytes 46 55 4C 4C. */
+#define ROCKET_RECOVER_KNOWN_FULL_MAGIC      0x4C4C5546UL
+#define ROCKET_RECOVER_KNOWN_FULL_PAYLOAD_SIZE 4u
 
 /* ===================== PACKET AND CONTROL VOCABULARY ===================== */
 
@@ -73,7 +81,10 @@ typedef enum
     ROCKET_PKT_TELEMETRY      = 0x01,
     ROCKET_PKT_EVENT          = 0x02,
     ROCKET_PKT_ACTUATOR_STATUS = 0x03,
+    ROCKET_PKT_VARIABLE_HIL_STATE = 0x04,
+    ROCKET_PKT_VARIABLE_HIL_CONFIG = 0x05,
     ROCKET_PKT_SIMULATION     = 0x20,
+    ROCKET_PKT_VARIABLE_HIL_CONFIG_UPLOAD = 0x21,
     ROCKET_PKT_COMMAND        = 0x10,
     ROCKET_PKT_ACK            = 0x11,
     ROCKET_PKT_HEARTBEAT      = 0x12
@@ -98,10 +109,23 @@ typedef enum
     ROCKET_CMD_BENCH_MOVE_STEPS  = 0x1A, /* int32: absolute motor steps */
     ROCKET_CMD_SIM_START         = 0x20,
     ROCKET_CMD_SIM_STOP          = 0x21,
+    ROCKET_CMD_HIL_SET_OVERRIDE  = 0x22, /* uint8: RocketHilOverrideMode */
+    ROCKET_CMD_VARIABLE_HIL_GET_CONFIG = 0x23,
+    /* ACK vocabulary for ROCKET_PKT_VARIABLE_HIL_CONFIG_UPLOAD. */
+    ROCKET_CMD_VARIABLE_HIL_CONFIG_UPLOAD = 0x24,
+    /* CONTINUOUS_HIL-only reset-zero to known-FULL recovery. */
+    ROCKET_CMD_RECOVER_KNOWN_FULL_RETRACT = 0x25,
     ROCKET_CMD_START_LOG         = 0x30,
     ROCKET_CMD_STOP_LOG          = 0x31,
     ROCKET_CMD_ERASE_LOG         = 0x32
 } RocketCommandCode;
+
+typedef enum
+{
+    ROCKET_HIL_OVERRIDE_OFF        = 0,
+    ROCKET_HIL_OVERRIDE_FORCE_FULL = 1,
+    ROCKET_HIL_OVERRIDE_FORCE_HOME = 2
+} RocketHilOverrideMode;
 
 typedef enum
 {
@@ -213,6 +237,54 @@ enum
     ROCKET_ACTUATOR_FLAG_MANUAL_PENDING = 1u << 7
 };
 
+/*
+ * The protocol-v2 actuator payload retains its 24-byte size. These bits reuse
+ * the existing reserved uint16 field. HOME/FULL are software geometry states
+ * derived from TMC5240 XACTUAL, not physical switches or encoder feedback.
+ */
+enum
+{
+    ROCKET_ACTUATOR_STATUS_SOFTWARE_HOME     = 1u << 0,
+    ROCKET_ACTUATOR_STATUS_SOFTWARE_FULL     = 1u << 1,
+    ROCKET_ACTUATOR_STATUS_GEOMETRY_VALID    = 1u << 2,
+    ROCKET_ACTUATOR_STATUS_OVERRIDE_ACTIVE   = 1u << 3,
+    ROCKET_ACTUATOR_STATUS_OVERRIDE_SHIFT    = 4,
+    ROCKET_ACTUATOR_STATUS_OVERRIDE_MASK     = 3u << 4,
+    ROCKET_ACTUATOR_STATUS_CONTINUOUS_HIL    = 1u << 6,
+    ROCKET_ACTUATOR_STATUS_STROKE_VERIFIED   = 1u << 7,
+    ROCKET_ACTUATOR_STATUS_VARIABLE_HIL      = 1u << 8,
+
+    /* Protocol/source compatibility aliases; numeric values are unchanged. */
+    ROCKET_ACTUATOR_STATUS_HOME_ACTIVE =
+        ROCKET_ACTUATOR_STATUS_SOFTWARE_HOME,
+    ROCKET_ACTUATOR_STATUS_FULL_ACTIVE =
+        ROCKET_ACTUATOR_STATUS_SOFTWARE_FULL,
+    ROCKET_ACTUATOR_STATUS_LIMITS_PLAUSIBLE =
+        ROCKET_ACTUATOR_STATUS_GEOMETRY_VALID,
+    ROCKET_ACTUATOR_STATUS_SEQUENCE_VERIFIED =
+        ROCKET_ACTUATOR_STATUS_STROKE_VERIFIED
+};
+
+/* Variable-HIL state flags report gates/state; no bit independently authorizes motion. */
+enum
+{
+    ROCKET_VARIABLE_HIL_FLAG_DRIVER_OK       = 1u << 0,
+    ROCKET_VARIABLE_HIL_FLAG_DRIVER_ENABLED  = 1u << 1,
+    ROCKET_VARIABLE_HIL_FLAG_CONFIG_VALID    = 1u << 2,
+    ROCKET_VARIABLE_HIL_FLAG_SIM_ACTIVE      = 1u << 3,
+    ROCKET_VARIABLE_HIL_FLAG_SIM_FRESH       = 1u << 4,
+    ROCKET_VARIABLE_HIL_FLAG_ARMED            = 1u << 5,
+    ROCKET_VARIABLE_HIL_FLAG_SOFTWARE_HOME    = 1u << 6,
+    ROCKET_VARIABLE_HIL_FLAG_TARGET_REACHABLE = 1u << 7
+};
+
+typedef enum
+{
+    ROCKET_VARIABLE_HIL_FEEDBACK_UNKNOWN = 0,
+    /* TMC5240 ramp-generator XACTUAL, not an encoder or mechanical measurement. */
+    ROCKET_VARIABLE_HIL_FEEDBACK_TMC5240_XACTUAL = 1
+} RocketVariableHilFeedbackSource;
+
 /* ===================== FRAME RESULTS AND WIRE DATA MODELS ===================== */
 
 typedef enum
@@ -306,6 +378,63 @@ typedef struct
     uint8_t flags;
     uint16_t reserved;
 } RocketActuatorStatusPayload;
+
+/*
+ * Causal VARIABLE_HIL reply wire size: 44 bytes. Fractions use 0..65535 for
+ * 0.0..1.0. Predicted apogees use signed decimetres. The simulation sequence
+ * is copied from the accepted host packet.
+ */
+typedef struct
+{
+    uint16_t simulation_sequence;
+    uint16_t controller_fraction_u16;
+    uint16_t actuator_target_fraction_u16;
+    uint16_t xactual_fraction_u16;
+    int32_t target_steps;
+    int32_t actual_steps;
+    uint32_t flight_inhibit_flags;
+    uint32_t actuator_inhibit_flags;
+    uint32_t driver_status;
+    uint32_t config_crc32;
+    int32_t closed_predicted_apogee_dm;
+    int32_t full_predicted_apogee_dm;
+    uint8_t phase;
+    uint8_t machine_state;
+    uint8_t state_flags;
+    uint8_t feedback_source;
+} RocketVariableHilStatePayload;
+
+/*
+ * Atomic VARIABLE_HIL control upload/readback wire size: 52 bytes. CdA values
+ * use 1e-6 m^2 units at implicit 0/25/50/75/100 percent deployment points.
+ * config_crc32 is IEEE CRC-32 over bytes 0..47 of this canonical payload.
+ */
+typedef struct
+{
+    uint8_t schema_version;
+    uint8_t control_mode;
+    uint8_t predictor_mode;
+    uint8_t cda_point_count;
+    uint32_t calibration_version;
+    uint16_t target_apogee_dm;
+    uint16_t mission_tolerance_dm;
+    uint16_t control_deadband_cm;
+    uint16_t full_deployment_error_dm;
+    uint16_t minimum_deploy_altitude_dm;
+    uint16_t minimum_flight_time_cs;
+    uint16_t predictive_update_period_ms;
+    uint16_t coast_mass_g;
+    uint8_t maximum_deploy_u8;
+    uint8_t hysteresis_permille;
+    uint16_t deployment_cda_um2[ROCKET_VARIABLE_HIL_CDA_POINT_COUNT];
+    uint16_t air_density_1e4_kgpm3;
+    uint16_t density_scale_height_m;
+    int16_t launch_site_elevation_dm;
+    uint16_t actuator_delay_ms;
+    uint16_t actuator_open_rate_milli_per_s;
+    uint16_t actuator_close_rate_milli_per_s;
+    uint32_t config_crc32;
+} RocketVariableHilConfigPayload;
 
 /* Heartbeat wire size: 8 bytes; build identity plus transport error summary. */
 typedef struct
@@ -437,6 +566,22 @@ size_t RocketProtocol_EncodeActuatorStatusPayload(
     uint8_t *out,
     size_t capacity,
     const RocketActuatorStatusPayload *payload);
+size_t RocketProtocol_EncodeVariableHilStatePayload(
+    uint8_t *out,
+    size_t capacity,
+    const RocketVariableHilStatePayload *payload);
+int RocketProtocol_DecodeVariableHilStatePayload(
+    const uint8_t *data,
+    size_t length,
+    RocketVariableHilStatePayload *payload);
+size_t RocketProtocol_EncodeVariableHilConfigPayload(
+    uint8_t *out,
+    size_t capacity,
+    const RocketVariableHilConfigPayload *payload);
+int RocketProtocol_DecodeVariableHilConfigPayload(
+    const uint8_t *data,
+    size_t length,
+    RocketVariableHilConfigPayload *payload);
 size_t RocketProtocol_EncodeHeartbeatPayload(uint8_t *out,
                                              size_t capacity,
                                              const RocketHeartbeatPayload *payload);
