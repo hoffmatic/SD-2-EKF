@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import os
 import sys
 import unittest
@@ -38,6 +39,23 @@ BRIDGE_PATH = ROOT / "build" / (
 
 
 class ConfigurationIsolationTests(unittest.TestCase):
+    def test_reference_entrypoint_reaches_flight_execution(self) -> None:
+        source_path = MODULE_DIR / "run_rocketpy_sim.py"
+        module = ast.parse(source_path.read_text(encoding="utf-8"))
+        functions = {
+            node.name: node
+            for node in module.body
+            if isinstance(node, ast.FunctionDef)
+        }
+        self.assertIn("run_fixed_deployment", functions)
+        main_calls = {
+            node.func.id
+            for node in ast.walk(functions["main"])
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        self.assertIn("run_passive", main_calls)
+        self.assertIn("run_closed_loop", main_calls)
+
     def test_normal_reference_remains_legacy(self) -> None:
         config = load_config()
         self.assertEqual(config["airbrakes"]["sampling_rate_hz"], 100.0)
